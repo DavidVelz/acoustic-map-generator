@@ -43,14 +43,16 @@ export const defaultParams = {
 	sourceSpacing: 1,
 	// Color/umbral centralizado para overlay (en dB / metros)
 	colorOverlay: {
-		redThreshold: 65,    // Umbral para rojo
-		yellowThreshold: 55, // Umbral para amarillo
-		yellowSpread: 10.0,   // Spread para la transición a verde
-		overlaySmoothSize: 5,
-		overlaySmoothSigma: 1.5,
-		greenThreshold: 45,  // Umbral para verde
-		redRadius: 15.0,
-		redDecay: 12.0
+		redThreshold: 90,    // Umbral para rojo (mapear a Lw alto)
+		yellowThreshold: 75, // Umbral para amarillo
+		yellowSpread: 8.0,   // Spread para la transición a verde
+		overlaySmoothSize: 7,    // Suavizado más pronunciado similar al referente
+		overlaySmoothSigma: 2.0,
+		greenThreshold: 60,  // Umbral para verde
+		redRadius: 12.0,
+		redDecay: 6.0,
+		// cuánto del largo del segmento se usa como sigma lateral (fracción del segLen)
+		lateralSpreadFactor: 1.0
 	},
 	// Atenuación: omnidireccional para crear el halo
 	attenuation: {

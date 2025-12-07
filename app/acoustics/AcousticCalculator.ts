@@ -80,7 +80,7 @@ export default class AcousticCalculator {
       RePrimeMap[seg.name] = ISOModel.computeFacadeRePrime(elems);
     }
 
-    // compute centroid of perimeter (used to orient normals outward)
+    // compute centroid of perimeter (used previously; kept for fallback)
     let centroidX = 0, centroidY = 0;
     if (cfg.poly && cfg.poly.length) {
       for (const p of cfg.poly) { centroidX += p[0]; centroidY += p[1]; }
@@ -161,6 +161,8 @@ export default class AcousticCalculator {
     const defaultRedRadius = Number(overlayParams.redRadius ?? 15.0);
     const defaultRedDecay = Number(overlayParams.redDecay ?? 12.0);
     const lateralTaper = Number((overlayParams as any).lateralTaper ?? 0.25);
+    // control de difusión a lo largo del segmento (fracción del segLen)
+    const lateralSpreadFactor = Number((overlayParams as any).lateralSpreadFactor ?? 0.8);
 
     // helper: project point onto a segment and return t (meters), closest coords and segLen
     const projectOnSegment = (px: number, pz: number, ax: number, az: number, bx: number, bz: number) => {
@@ -212,23 +214,37 @@ export default class AcousticCalculator {
             const proj = projectOnSegment(px, pz, ax, az, bx, bz);
             const { segLen, tClamped, closestX, closestZ } = proj;
 
-            // vector from centroid to closest point -> used to orient normal outward
-            const vxToCentroid = closestX - centroidX;
-            const vzToCentroid = closestZ - centroidY;
+            // --- REPLACED: robust outward-normal & probe (was centroid-based) ---
             // tangent unit
             const tx = segLen > 1e-9 ? (bx - ax) / segLen : 1;
             const tz = segLen > 1e-9 ? (bz - az) / segLen : 0;
-            // nominal outward normal (rotate tangent)
+            // nominal normal (rotate tangent)
             let nx = -tz, nz = tx;
-            // if normal points TOWARDS centroid (dot<0), flip so it points outward
-            const dotCent = nx * vxToCentroid + nz * vzToCentroid;
-            if (dotCent < 0) { nx = -nx; nz = -nz; }
-
-            // probe a tiny step from facade outward; if probe is inside polygon, facade points inward -> skip
-            const probeStep = Math.max(0.05, (cfg.params?.cellSize ?? 1) * 0.25);
-            const probeX = closestX + nx * probeStep;
-            const probeZ = closestZ + nz * probeStep;
-            if (cfg.poly && cfg.poly.length && pointInPolygon(probeX, probeZ, cfg.poly)) continue;
+            // robust test: probe a small step on both sides of the facade to detect interior side
+            const probeStep = Math.max(0.05, (cfg.params?.cellSize ?? 1) * 0.35);
+            const testOutX = closestX + nx * probeStep;
+            const testOutZ = closestZ + nz * probeStep;
+            const testInX = closestX - nx * probeStep;
+            const testInZ = closestZ - nz * probeStep;
+            let outIsInside = false, inIsInside = false;
+            if (cfg.poly && cfg.poly.length) {
+              outIsInside = pointInPolygon(testOutX, testOutZ, cfg.poly);
+              inIsInside = pointInPolygon(testInX, testInZ, cfg.poly);
+            }
+            // If OUT probe is inside and IN is outside, flip normal so OUT points outward
+            if (outIsInside && !inIsInside) { nx = -nx; nz = -nz; }
+            // If both probes are inside (ambiguous for concave/holes), fall back to centroid test
+            if (outIsInside && inIsInside && cfg.poly && cfg.poly.length) {
+              const vxToCentroid = closestX - centroidX;
+              const vzToCentroid = closestZ - centroidY;
+              const dotCent = nx * vxToCentroid + nz * vzToCentroid;
+              if (dotCent < 0) { nx = -nx; nz = -nz; }
+            }
+            // Final probe: if the outward probe (closest + normal) STILL lies inside polygon, skip this facade contribution
+            const finalProbeX = closestX + nx * probeStep;
+            const finalProbeZ = closestZ + nz * probeStep;
+            if (cfg.poly && cfg.poly.length && pointInPolygon(finalProbeX, finalProbeZ, cfg.poly)) continue;
+            // --- END REPLACED ---
 
             const offX = px - closestX, offZ = pz - closestZ;
             const distFront = Math.hypot(offX, offZ);
@@ -252,6 +268,15 @@ export default class AcousticCalculator {
 
             if (distFront > redRadius && distFront > (overlayParams?.blueRadius ?? 20)) continue;
 
+            // lateral gaussian weight (allows smooth falloff across the segment width)
+            const lateralSigma = Math.max((cfg.params?.cellSize ?? 1) * 0.5, segLen * lateralSpreadFactor);
+            // tangentialAbs = distancia a lo largo del segmento desde el punto más cercano
+            let lateralWeight = Math.exp(- (tangentialAbs * tangentialAbs) / (2 * lateralSigma * lateralSigma));
+            // ENSANCHAR: aplicar exponente < 1 para hacer la campana más ancha (más cobertura lateral)
+            lateralWeight = Math.pow(lateralWeight, 0.6);
+            // evitar que sea demasiado pequeño: establecer umbral mínimo
+            const combinedLateralWeight = Math.max(0.08, lateralWeight);
+
             // compute taper and frontal weight
             const wEdge = edgeTaperWeight(tClamped, segLen, lateralTaper);
             const wFront = Math.max(0, 1 - distFront / Math.max(1e-6, redRadius));
@@ -259,8 +284,16 @@ export default class AcousticCalculator {
             // contribution: prefer linear decay from Lw (strong visual red) but mix with inverse-distance log
             const linContrib = Math.max(0, lw - redDecay * distFront);
             const logContrib = lw - 20 * Math.log10(Math.max(distFront, 0.01));
-            // blend linear (preserves high near source) and log (natural decay)
-            const contribution = Math.min(lw, (0.6 * linContrib + 0.4 * logContrib) * wEdge * wFront);
+            // añadir refuerzo según nivel de fuente (fuentes más potentes "empujan" más color)
+            const sourceBoost = 1 + Math.max(0, (lw - 60) / 40); // ~1..2.5 para lw 60..160
+            const baseComb = (0.6 * linContrib + 0.4 * logContrib) * wEdge * wFront * combinedLateralWeight;
+            let contribution = baseComb * sourceBoost;
+            // asegurar que muy cerca de la fachada la contribución no quede por debajo de un valor razonable
+            if (distFront < Math.max(0.1, (cfg.params?.cellSize ?? 1) * 0.5)) {
+              contribution = Math.max(contribution, Math.min(lw, lw - redDecay * 0.15));
+            }
+            // clamp al nivel source
+            contribution = Math.min(lw, contribution);
 
             if (contribution > bestValue) bestValue = contribution;
           }

@@ -1,14 +1,13 @@
 export function getColorscale() {
-  // Deep-blue -> cyan -> green -> yellow -> orange -> red
+  // Deep-blue -> cyan -> green -> yellow -> orange -> red (fallback)
   return [
-    [0.0, "#001f7a"], // deep blue
-    [0.15, "#0047ab"], // strong blue
-    [0.30, "#00ffff"], // cyan
-    [0.45, "#00ff66"], // green-cyan
-    [0.60, "#00ff00"], // green
-    [0.75, "#ffff00"], // yellow
-    [0.90, "#ffa500"], // orange
-    [1.0, "#ff0000"]   // red
+    [0.0, "#00224d"],
+    [0.2, "#00539a"],
+    [0.4, "#00cccc"],
+    [0.55, "#00cc66"],
+    [0.70, "#ffff33"],
+    [0.85, "#ff8c00"],
+    [1.0, "#ff0000"]
   ] as [number, string][];
 }
 
@@ -21,71 +20,120 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
   const clamp = (v: number) => Math.max(0, Math.min(1, v));
   const toNorm = (v: number) => clamp((v - zmin) / (zmax - zmin));
 
-  const redT = thresholds.redThreshold ?? 65;
-  const yellowT = thresholds.yellowThreshold ?? 55;
-  const greenT = thresholds.greenThreshold ?? 45;
-  const blueT = 35; // Umbral para el azul
+  const redT = thresholds.redThreshold ?? 90;
+  const yellowT = thresholds.yellowThreshold ?? 75;
+  const greenT = thresholds.greenThreshold ?? 60;
+  const blueT = Math.min(greenT - 10, (zmin + (zmax - zmin) * 0.15)); // zona azul por debajo del verde
 
-  // Colores base para la escala
+  // base colors (tuned to referencia)
   const C = {
-    deepBlue: "#00539a",
-    green: "#00ff00",
-    yellow: "#ffff00",
+    deepBlue: "#00224d",
+    cyan: "#00cccc",
+    green: "#00cc66",
+    yellow: "#ffff33",
+    orange: "#ff8c00",
     red: "#ff0000"
   };
 
-  // Helper para mezclar colores
-  const hexToRgb = (hex: string) => {
-    const h = hex.replace("#", "");
-    const bigint = parseInt(h, 16);
-    return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
-  };
-  const rgbToHex = (r: number, g: number, b: number) => "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
-  const mix = (c1: string, c2: string, t: number) => {
-    const rgb1 = hexToRgb(c1);
-    const rgb2 = hexToRgb(c2);
-    return rgbToHex(rgb1.r + (rgb2.r - rgb1.r) * t, rgb1.g + (rgb2.g - rgb1.g) * t, rgb1.b + (rgb2.b - rgb1.b) * t);
-  };
+  // If thresholds lie outside the available z-range, fall back to a distributed scale
+  // This prevents color stops collapsing when thresholds > zmax or < zmin.
+  const thresholdsOutOfRange = (redT <= zmin || redT >= zmax) || (greenT <= zmin || greenT >= zmax) || (yellowT <= zmin || yellowT >= zmax);
+  if (thresholdsOutOfRange) {
+    // evenly distribute stops across [0..1] with smooth interpolation
+    const stopsEven: [number, string][] = [
+      [0.0, C.deepBlue],
+      [0.18, C.cyan],
+      [0.38, C.green],
+      [0.58, C.yellow],
+      [0.76, C.orange],
+      [1.0, C.red]
+    ];
+    // interpolate small intermediate steps for smoothness
+    const interp = (c1: string, c2: string, t: number) => {
+      const hexToRgb = (hex: string) => {
+        const h = hex.replace("#", "");
+        const n = parseInt(h, 16);
+        return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+      };
+      const rgbToHex = (r: number, g: number, b: number) =>
+        "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
+      const a = hexToRgb(c1), b = hexToRgb(c2);
+      return rgbToHex(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t);
+    };
 
-  // Escala de colores con transiciones suaves
-  const replicaColorscale: [number, string][] = [
+    const smoothStops: [number, string][] = [];
+    for (let i = 0; i < stopsEven.length - 1; i++) {
+      const [p1, c1] = stopsEven[i];
+      const [p2, c2] = stopsEven[i + 1];
+      smoothStops.push([p1, c1]);
+      for (let k = 1; k <= 2; k++) {
+        const t = k / 3;
+        smoothStops.push([p1 + (p2 - p1) * t, interp(c1, c2, t)]);
+      }
+    }
+    smoothStops.push(stopsEven[stopsEven.length - 1]);
+    // ensure monotonic & unique
+    const uniq: [number, string][] = [];
+    let last = -1;
+    for (const [p, c] of smoothStops) {
+      const pos = Math.max(0, Math.min(1, Number.isFinite(p) ? p : 0));
+      if (pos <= last) continue;
+      uniq.push([pos, c]);
+      last = pos;
+    }
+    return uniq.length >= 2 ? uniq : getColorscale();
+  }
+
+  // compute normalized stops using thresholds (thresholds are in absolute dB)
+  const stops: [number, string][] = [
     [0.0, C.deepBlue],
     [toNorm(blueT), C.deepBlue],
     [toNorm(greenT), C.green],
+    [toNorm((greenT + yellowT) / 2), C.cyan],
     [toNorm(yellowT), C.yellow],
+    [toNorm((yellowT + redT) / 2), C.orange],
     [toNorm(redT), C.red],
     [1.0, C.red]
   ];
 
-  // Interpolar para crear un gradiente más suave
-  const smoothScale: [number, string][] = [];
-  for (let i = 0; i < replicaColorscale.length - 1; i++) {
-    const [p1, c1] = replicaColorscale[i];
-    const [p2, c2] = replicaColorscale[i + 1];
-    smoothScale.push([p1, c1]);
-    // Añadir 3 pasos intermedios para suavizar la transición
-    for (let j = 1; j <= 3; j++) {
-      const t = j / 4;
-      smoothScale.push([p1 + (p2 - p1) * t, mix(c1, c2, t)]);
+  // interpolate extra steps for smoother transitions
+  const interp = (c1: string, c2: string, t: number) => {
+    const hexToRgb = (hex: string) => {
+      const h = hex.replace("#", "");
+      const n = parseInt(h, 16);
+      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    };
+    const rgbToHex = (r: number, g: number, b: number) =>
+      "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
+    const a = hexToRgb(c1), b = hexToRgb(c2);
+    return rgbToHex(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t);
+  };
+
+  const smoothStops: [number, string][] = [];
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [p1, c1] = stops[i];
+    const [p2, c2] = stops[i + 1];
+    smoothStops.push([p1, c1]);
+    // add 2 intermediate colors
+    for (let k = 1; k <= 2; k++) {
+      const t = k / 3;
+      smoothStops.push([p1 + (p2 - p1) * t, interp(c1, c2, t)]);
     }
   }
-  smoothScale.push(replicaColorscale[replicaColorscale.length - 1]);
+  smoothStops.push(stops[stops.length - 1]);
 
-
-  // ensure monotonic positions and remove duplicates (Plotly requires sorted ascending)
-  const uniqStops: [number, string][] = [];
-  let lastPos = -1;
-  for (const [pos, col] of smoothScale) {
-    const p = Math.max(0, Math.min(1, Number.isFinite(pos) ? pos : 0));
-    if (p < lastPos) continue;
-    if (p === lastPos && uniqStops.length > 0) continue; // Evitar duplicados en la misma posición
-    uniqStops.push([p, col]);
-    lastPos = p;
+  // ensure monotonic increasing and unique colors per stop
+  const uniq: [number, string][] = [];
+  let last = -1;
+  for (const [p, c] of smoothStops) {
+    const pos = Math.max(0, Math.min(1, Number.isFinite(p) ? p : 0));
+    if (pos < last) continue;
+    if (pos === last) continue;
+    uniq.push([pos, c]);
+    last = pos;
   }
-
-  // if somehow only one stop remains, fallback
-  if (uniqStops.length < 2) return getColorscale();
-  return uniqStops;
+  if (uniq.length < 2) return getColorscale();
+  return uniq;
 }
 
 /**
