@@ -4,18 +4,23 @@ import GaussianSmoother from "./GaussianSmoother";
 import { applyColorAttenuation } from "./ColorMap";
 import ISOModel from "../lib/ISOModel";
 import { buildAllFacades } from "./FacadeUtils";
+import { defaultParams } from "../config";
+import { generateSegmentBandEnergy, pointInPolygon } from "./GradientFactory";
 
-// Simple point-in-polygon test (ray casting algorithm)
-function pointInPolygon(x: number, y: number, poly: number[][]): boolean {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i][0], yi = poly[i][1];
-    const xj = poly[j][0], yj = poly[j][1];
-    const intersect = ((yi > y) !== (yj > y)) &&
-      (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-12) + xi);
-    if (intersect) inside = !inside;
+// Helper function for edge tapering
+function edgeTaperWeight(pos: number, segLen: number, taper: number = 0.25): number {
+  // pos: position along segment (meters), segLen: total segment length (meters), taper: fraction of length to taper at each end
+  if (segLen <= 0) return 1;
+  const taperLen = Math.max(0, Math.min(segLen * taper, segLen / 2));
+  if (taperLen === 0) return 1;
+  if (pos < taperLen) {
+    // Start taper
+    return pos / taperLen;
+  } else if (pos > segLen - taperLen) {
+    // End taper
+    return (segLen - pos) / taperLen;
   }
-  return inside;
+  return 1;
 }
 
 type ComputeCfg = {
@@ -156,44 +161,81 @@ export default class AcousticCalculator {
     const finalSigma = cfg.params?.finalSmoothSigma ?? 0.8;
     smoothed = GaussianSmoother.apply(smoothed, finalSize, finalSigma);
 
-    // --- Per-facade strong-signal overlay using centralized params ---
+    // --- Per-facade strong-signal overlay using band-specific gradient generator ---
     const overlayParams = (cfg.params && (cfg.params as any).colorOverlay) || {};
-    const defaultRedRadius = Number(overlayParams.redRadius ?? 15.0);
-    const defaultRedDecay = Number(overlayParams.redDecay ?? 12.0);
-    const lateralTaper = Number((overlayParams as any).lateralTaper ?? 0.25);
-    // control de difusión a lo largo del segmento (fracción del segLen)
-    const lateralSpreadFactor = Number((overlayParams as any).lateralSpreadFactor ?? 0.8);
+    const globalHotBoost = (overlayParams as any).hotBoost ?? 1.0;
 
-    // helper: project point onto a segment and return t (meters), closest coords and segLen
-    const projectOnSegment = (px: number, pz: number, ax: number, az: number, bx: number, bz: number) => {
-      const vx = bx - ax, vz = bz - az;
-      const segLen = Math.hypot(vx, vz);
-      if (segLen <= 1e-9) return { segLen: 0, tParam: 0, tClamped: 0, closestX: ax, closestZ: az };
-      const wx = px - ax, wz = pz - az;
-      const tRaw = (wx * vx + wz * vz) / (segLen * segLen);
-      const tClampedFrac = Math.max(0, Math.min(1, tRaw));
-      const closestX = ax + vx * tClampedFrac;
-      const closestZ = az + vz * tClampedFrac;
-      const tParam = tRaw * segLen;
-      const tClamped = tClampedFrac * segLen;
-      return { segLen, tParam, tClamped, closestX, closestZ };
-    };
+    const h = res, w = res;
+    const energyGrid: number[][] = Array.from({ length: h }, () => new Array(w).fill(0));
 
-    // edge taper
-    const edgeTaperWeight = (tClamped: number, segLen: number, lateralTaperVal: number) => {
-      if (segLen <= 0) return 0;
-      const atStart = tClamped / Math.max(1e-6, segLen);
-      const atEnd = (segLen - tClamped) / Math.max(1e-6, segLen);
-      const raw = Math.min(atStart, atEnd);
-      if (lateralTaperVal <= 1e-6) return raw > 0.15 ? 1 : 0;
-      return Math.pow(Math.max(0, Math.min(1, raw * 2)), 1 + 2 * lateralTaperVal);
-    };
+    const redThreshold = Number(overlayParams.redThreshold ?? 70);
 
-    // overlay baseline: copy smoothed but replace non-finite with -Infinity for comparison logic
-    let overlay: number[][] = smoothed.map(row => row.map(v => Number.isFinite(v) ? v : -Infinity));
+    // Use GradientFactory per segment and per band
+    for (const seg of main ?? []) {
+      const segName = seg.name;
+      const lwValRaw = Number(cfg.Lw?.[segName]);
+      const Lw_room = Number.isFinite(lwValRaw) ? lwValRaw : NaN;
+      if (!Number.isFinite(Lw_room)) continue;
+      const RePrime = RePrimeMap[segName] ?? 30;
+
+      // decide bands
+      const bands: ("red"|"yellow"|"green"|"blue")[] = ["blue","green"];
+      const yellowT = Number(overlayParams.yellowThreshold ?? 50);
+      if (Lw_room >= yellowT) bands.push("yellow");
+      if (Lw_room >= redThreshold) bands.push("red");
+
+      for (const band of bands) {
+        const bandEnergy = generateSegmentBandEnergy(seg as any, band as any, Lw_room, RePrime, xs, ys, {
+          cellSize: cfg.params?.cellSize,
+          sourceSpacing: cfg.params?.sourceSpacing,
+          redMaxDist: overlayParams.redMaxDist,
+          redFalloffScale: overlayParams.redFalloffScale,
+          lateralTaper: overlayParams.lateralTaper,
+          colorSpread: overlayParams.colorSpread,
+          propagation: overlayParams.propagation,
+          // nuevos parámetros de calibración
+          normalize: (overlayParams && (overlayParams as any).normalize) ?? (cfg.params && (cfg.params as any).normalize) ?? "per_meter",
+          redSampleSpacing: (overlayParams && (overlayParams as any).redSampleSpacing) ?? 0.12,
+          dotThreshold: (overlayParams && (overlayParams as any).dotThreshold) ?? -0.18,
+          poly: cfg.poly ?? null,
+          center: { x: centroidX, y: centroidY },
+          debugEmit: overlayParams && (overlayParams as any).debugEmit,
+          __emitPoints: (overlayParams && (overlayParams as any).__emitPoints) || []
+        });
+        for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+          const v = bandEnergy[j][i];
+          if (Number.isFinite(v) && v > 0) energyGrid[j][i] += v;
+        }
+      }
+    }
+
+    // convert to dB and continue as before
+    const sourceLpGrid: number[][] = energyGrid.map(row => row.map(e => e > 0 ? 10 * Math.log10(e) : NaN));
+
+    // overlay: combine base smoothed (dB) + source-driven (we have energyGrid linear)
+    // convert base smoothed (dB) into linear energy and sum with energyGrid, then back to dB
+    const combinedEnergy: number[][] = Array.from({ length: h }, (_, j) => new Array(w).fill(0));
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        const baseDb = smoothed[j][i];
+        const baseEnergy = Number.isFinite(baseDb) ? Math.pow(10, baseDb / 10) : 0;
+        const srcEnergy = Number.isFinite(energyGrid[j][i]) ? energyGrid[j][i] : 0;
+        combinedEnergy[j][i] = baseEnergy + srcEnergy;
+      }
+    }
+    // convert back to dB grid (NaN when zero)
+    let overlay: number[][] = combinedEnergy.map(row => row.map(e => e > 0 ? 10 * Math.log10(e) : NaN));
+
+    // --- END REPLACED ---
 
     // parameters to make "hot" facades stronger when Lw high
-    const globalHotBoost = (overlayParams as any).hotBoost ?? 1.0;
+    // const globalHotBoost = (overlayParams as any).hotBoost ?? 1.0; // Removed duplicate declaration
+
+    // Define default values for redRadius and redDecay
+    const defaultRedRadius = 2.5;
+    const defaultRedDecay = 6.0;
+    const lateralSpreadFactor = 0.18;
+    const lateralTaper = overlayParams.lateralTaper ?? 0.25;
 
     for (let j = 0; j < res; j++) {
       for (let i = 0; i < res; i++) {
@@ -211,8 +253,35 @@ export default class AcousticCalculator {
             const ax = seg.p1[0], az = seg.p1[1];
             const bx = seg.p2[0], bz = seg.p2[1];
 
-            const proj = projectOnSegment(px, pz, ax, az, bx, bz);
-            const { segLen, tClamped, closestX, closestZ } = proj;
+            // Fix: define cellSize from params with fallback
+            const cellSize = cfg.params?.cellSize ?? 1;
+
+            // Helper: project point (px, pz) onto segment (ax, az)-(bx, bz)
+            function projectOnSegment(px: number, pz: number, ax: number, az: number, bx: number, bz: number) {
+              const vx = bx - ax, vz = bz - az;
+              const wx = px - ax, wz = pz - az;
+              const segLen = Math.hypot(vx, vz);
+              const len2 = vx * vx + vz * vz;
+              const t = len2 > 0 ? (wx * vx + wz * vz) / len2 : 0;
+              const tClamped = Math.max(0, Math.min(1, t));
+              const closestX = ax + vx * tClamped;
+              const closestZ = az + vz * tClamped;
+              return {
+                segLen,
+                tClamped,
+                closestX,
+                closestZ,
+                tFrac: t // unclamped
+              };
+            }
+            
+                        const proj = projectOnSegment(px, pz, ax, az, bx, bz);
+                        const { segLen, tClamped, closestX, closestZ, tFrac } = proj;
+            // Allow larger fractional tolerance around segment ends to blend corners better
+            const tFracTol = 0.08; // ~8% tolerance along segment
+            if (tFrac < -tFracTol || tFrac > 1 + tFracTol) continue;
+            // If projection is slightly outside [0..1] (near a corner), keep contribution but reduce its strength smoothly
+            const nearEndBlend = (tFrac < 0 || tFrac > 1) ? Math.max(0.18, 1 - Math.abs(tFrac < 0 ? tFrac : tFrac - 1) / tFracTol) : 1.0;
 
             // --- REPLACED: robust outward-normal & probe (was centroid-based) ---
             // tangent unit
@@ -269,13 +338,15 @@ export default class AcousticCalculator {
             if (distFront > redRadius && distFront > (overlayParams?.blueRadius ?? 20)) continue;
 
             // lateral gaussian weight (allows smooth falloff across the segment width)
-            const lateralSigma = Math.max((cfg.params?.cellSize ?? 1) * 0.5, segLen * lateralSpreadFactor);
-            // tangentialAbs = distancia a lo largo del segmento desde el punto más cercano
+            const lateralSigma = Math.max(cellSize * 0.25, segLen * lateralSpreadFactor);
             let lateralWeight = Math.exp(- (tangentialAbs * tangentialAbs) / (2 * lateralSigma * lateralSigma));
-            // ENSANCHAR: aplicar exponente < 1 para hacer la campana más ancha (más cobertura lateral)
-            lateralWeight = Math.pow(lateralWeight, 0.6);
-            // evitar que sea demasiado pequeño: establecer umbral mínimo
-            const combinedLateralWeight = Math.max(0.08, lateralWeight);
+            lateralWeight = Math.pow(lateralWeight, 0.95);
+            // along-segment gaussian: favor points close to the middle of the segment so halos span the face
+            const centerOffset = Math.abs(tClamped - (segLen * 0.5)); // meters from center
+            const alongSigma = Math.max(segLen * 0.25, cellSize * 0.5);
+            const alongWeight = Math.exp(- (centerOffset * centerOffset) / (2 * alongSigma * alongSigma));
+            // combine lateral + along weights, apply near-end blending to soften corners
+            const combinedLateralWeight = Math.max(0.002, lateralWeight * Math.pow(alongWeight, 0.95) * nearEndBlend);
 
             // compute taper and frontal weight
             const wEdge = edgeTaperWeight(tClamped, segLen, lateralTaper);
@@ -323,8 +394,29 @@ export default class AcousticCalculator {
     const finalMin = flatFinal.length ? Math.min(...flatFinal) : 0;
     const finalMax = flatFinal.length ? Math.max(...flatFinal) : 0;
 
+    // CAP: ensure final map does not exceed supplied Lw values.
+    // If the user set all segment Lw/Lp below a threshold (e.g. <50), no cell should show higher.
+    const suppliedLwVals = Object.values(cfg.Lw || {}).map(v => Number(v)).filter(Number.isFinite);
+    if (suppliedLwVals.length) {
+      const maxSuppliedLw = Math.max(...suppliedLwVals);
+      if (Number.isFinite(maxSuppliedLw)) {
+        for (let y = 0; y < finalSmooth.length; y++) {
+          for (let x = 0; x < finalSmooth[y].length; x++) {
+            if (Number.isFinite(finalSmooth[y][x])) {
+              finalSmooth[y][x] = Math.min(finalSmooth[y][x], maxSuppliedLw);
+            }
+          }
+        }
+      }
+    }
+
+    // recompute final min/max after cap
+    const flatFinalAfterCap = finalSmooth.flat().filter(v => Number.isFinite(v));
+    const finalMinAfter = flatFinalAfterCap.length ? Math.min(...flatFinalAfterCap) : finalMin;
+    const finalMaxAfter = flatFinalAfterCap.length ? Math.max(...flatFinalAfterCap) : finalMax;
+
     // Convert non-finite (NaN) to null so Plotly treats them as missing and respects transparent bg
     const zForPlot = finalSmooth.map(row => row.map(v => Number.isFinite(v) ? v : null));
-    return { x: xs, y: ys, z: zForPlot, min: finalMin, max: finalMax, poly: cfg.poly ?? [] };
+    return { x: xs, y: ys, z: zForPlot, min: finalMinAfter, max: finalMaxAfter, poly: cfg.poly ?? [] };
   }
 }

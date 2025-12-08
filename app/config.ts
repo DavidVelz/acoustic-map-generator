@@ -43,16 +43,42 @@ export const defaultParams = {
 	sourceSpacing: 1,
 	// Color/umbral centralizado para overlay (en dB / metros)
 	colorOverlay: {
-		redThreshold: 90,    // Umbral para rojo (mapear a Lw alto)
-		yellowThreshold: 75, // Umbral para amarillo
-		yellowSpread: 8.0,   // Spread para la transición a verde
-		overlaySmoothSize: 7,    // Suavizado más pronunciado similar al referente
-		overlaySmoothSigma: 2.0,
-		greenThreshold: 60,  // Umbral para verde
+		// Umbrales solicitados:
+		// rojo > 70, amarillo > 50, verde > 40, azul claro 20..40, azul oscuro <20
+		redThreshold: 70,
+		yellowThreshold: 50,
+		// ancho (dB) de la banda amarilla (se usa para posicionar stops de color)
+		yellowSpread: 10.0,
+		// Suavizado del overlay (aumentado para halos más suaves)
+		overlaySmoothSize: 11,
+		overlaySmoothSigma: 3.2,
+		greenThreshold: 40,
+		// azul claro / oscuro split
+		blueThreshold: 20,
 		redRadius: 12.0,
 		redDecay: 6.0,
 		// cuánto del largo del segmento se usa como sigma lateral (fracción del segLen)
-		lateralSpreadFactor: 1.0
+		lateralSpreadFactor: 1.15,
+		// factores que amplían la sigma lateral/longitudinal por banda de color (más anchos para verdes/azules)
+		colorSpread: { red: 1.0, yellow: 2.8, green: 4.0, blue: 6.0 },
+		// parámetros de propagación por banda: factor multiplicador del decay y distancia máxima
+		propagation: {
+			bandDecay: { red: 1.0, yellow: 0.6, green: 0.35 },
+			bandMaxDist: { red: 2.0, yellow: 6.0, green: 12.0 },
+			// multiplicador lateral adicional por banda (fine tune)
+			lateralMultiplier: { red: 1.0, yellow: 1.25, green: 1.6, blue: 2.2 }
+		},
+		// normalización: 'per_meter' asegura igualdad entre fachadas de distinta longitud
+		normalize: "per_meter" as "per_meter" | "per_sample" | "none",
+		// spacing (m) usado por la banda roja para muestreo fino (reduce huecos)
+		redSampleSpacing: 0.12,
+		// tolerancia para front-side check (permite dot ligeramente negativo)
+		dotThreshold: -0.18,
+		// control de caída (métrica) para limitar/atenuar rojo fuera de la zona cercana
+		redFalloffScale: 1.2,
+		// UI-linked caps (used by the menu sliders "Red max dist" / "Yellow max dist")
+		redMaxDist: 2.0,
+		yellowMaxDist: 6.0
 	},
 	// Atenuación: omnidireccional para crear el halo
 	attenuation: {

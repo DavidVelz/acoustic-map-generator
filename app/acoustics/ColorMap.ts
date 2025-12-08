@@ -13,19 +13,27 @@ export function getColorscale() {
 
 // New: build colorscale from thresholds and data range so red/yellow/green/blue
 // appear at the configured decibel levels and are normalized into [0..1] for Plotly.
-export function buildThresholdColorscale(zmin: number, zmax: number, thresholds: { redThreshold?: number; yellowThreshold?: number; greenThreshold?: number; yellowSpread?: number } | undefined) {
-  // fallback to default colorscale if inputs invalid
+export function buildThresholdColorscale(zmin: number, zmax: number, thresholds: { redThreshold?: number; yellowThreshold?: number; greenThreshold?: number; blueThreshold?: number; yellowSpread?: number } | undefined) {
   if (zmax <= zmin || !thresholds) return getColorscale();
+  const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+  const mapPos = (t: number) => {
+    if (!Number.isFinite(t)) return NaN;
+    // if z-range degenerate, map into [0.02..0.98] proportionally to absolute dB range 0..100
+    if (zmax - zmin < 1e-6) {
+      const approx = (t / 100);
+      return Math.max(0.02, Math.min(0.98, approx));
+    }
+    // map threshold into normalized position with soft clamp away from edges
+    const p = (t - zmin) / (zmax - zmin);
+    return Math.max(0.02, Math.min(0.98, p));
+  };
 
-  const clamp = (v: number) => Math.max(0, Math.min(1, v));
-  const toNorm = (v: number) => clamp((v - zmin) / (zmax - zmin));
+  const redT = thresholds.redThreshold ?? 70;
+  const yellowT = thresholds.yellowThreshold ?? 50;
+  const greenT = thresholds.greenThreshold ?? 40;
+  const blueT = Number.isFinite((thresholds as any).blueThreshold) ? (thresholds as any).blueThreshold : Math.max(0, greenT - 20);
+  const yellowSpread = Number((thresholds as any).yellowSpread ?? 10);
 
-  const redT = thresholds.redThreshold ?? 90;
-  const yellowT = thresholds.yellowThreshold ?? 75;
-  const greenT = thresholds.greenThreshold ?? 60;
-  const blueT = Math.min(greenT - 10, (zmin + (zmax - zmin) * 0.15)); // zona azul por debajo del verde
-
-  // base colors (tuned to referencia)
   const C = {
     deepBlue: "#00224d",
     cyan: "#00cccc",
@@ -35,76 +43,36 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
     red: "#ff0000"
   };
 
-  // If thresholds lie outside the available z-range, fall back to a distributed scale
-  // This prevents color stops collapsing when thresholds > zmax or < zmin.
-  const thresholdsOutOfRange = (redT <= zmin || redT >= zmax) || (greenT <= zmin || greenT >= zmax) || (yellowT <= zmin || yellowT >= zmax);
-  if (thresholdsOutOfRange) {
-    // evenly distribute stops across [0..1] with smooth interpolation
-    const stopsEven: [number, string][] = [
-      [0.0, C.deepBlue],
-      [0.18, C.cyan],
-      [0.38, C.green],
-      [0.58, C.yellow],
-      [0.76, C.orange],
-      [1.0, C.red]
-    ];
-    // interpolate small intermediate steps for smoothness
-    const interp = (c1: string, c2: string, t: number) => {
-      const hexToRgb = (hex: string) => {
-        const h = hex.replace("#", "");
-        const n = parseInt(h, 16);
-        return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
-      };
-      const rgbToHex = (r: number, g: number, b: number) =>
-        "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
-      const a = hexToRgb(c1), b = hexToRgb(c2);
-      return rgbToHex(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t);
-    };
+  // compute normalized positions (soft-clamped)
+  const pBlue = mapPos(blueT);
+  const pGreen = mapPos(greenT);
+  const pYellowLo = mapPos(yellowT - yellowSpread * 0.5);
+  const pYellow = mapPos(yellowT);
+  const pYellowHi = mapPos(yellowT + yellowSpread * 0.5);
+  const pRed = mapPos(redT);
 
-    const smoothStops: [number, string][] = [];
-    for (let i = 0; i < stopsEven.length - 1; i++) {
-      const [p1, c1] = stopsEven[i];
-      const [p2, c2] = stopsEven[i + 1];
-      smoothStops.push([p1, c1]);
-      for (let k = 1; k <= 2; k++) {
-        const t = k / 3;
-        smoothStops.push([p1 + (p2 - p1) * t, interp(c1, c2, t)]);
-      }
-    }
-    smoothStops.push(stopsEven[stopsEven.length - 1]);
-    // ensure monotonic & unique
-    const uniq: [number, string][] = [];
-    let last = -1;
-    for (const [p, c] of smoothStops) {
-      const pos = Math.max(0, Math.min(1, Number.isFinite(p) ? p : 0));
-      if (pos <= last) continue;
-      uniq.push([pos, c]);
-      last = pos;
-    }
-    return uniq.length >= 2 ? uniq : getColorscale();
-  }
-
-  // compute normalized stops using thresholds (thresholds are in absolute dB)
   const stops: [number, string][] = [
     [0.0, C.deepBlue],
-    [toNorm(blueT), C.deepBlue],
-    [toNorm(greenT), C.green],
-    [toNorm((greenT + yellowT) / 2), C.cyan],
-    [toNorm(yellowT), C.yellow],
-    [toNorm((yellowT + redT) / 2), C.orange],
-    [toNorm(redT), C.red],
-    [1.0, C.red]
   ];
+  if (!Number.isNaN(pBlue)) stops.push([clamp01(pBlue), C.cyan]);
+  if (!Number.isNaN(pGreen)) stops.push([clamp01(pGreen), C.green]);
+  if (!Number.isNaN(pYellowLo)) stops.push([clamp01(pYellowLo), C.cyan]);
+  if (!Number.isNaN(pYellow)) stops.push([clamp01(pYellow), C.yellow]);
+  if (!Number.isNaN(pYellowHi)) stops.push([clamp01(pYellowHi), C.orange]);
+  if (!Number.isNaN(pRed)) stops.push([clamp01(pRed), C.red]);
+  // top color: if red exists use red, else orange
+  const topColor = (!Number.isNaN(pRed)) ? C.red : C.orange;
+  stops.push([1.0, topColor]);
 
-  // interpolate extra steps for smoother transitions
+  // interpolate additional intermediate stops for smooth gradient
+  const hexToRgb = (hex: string) => {
+    const h = hex.replace("#", "");
+    const n = parseInt(h, 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  };
+  const rgbToHex = (r: number, g: number, b: number) =>
+    "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
   const interp = (c1: string, c2: string, t: number) => {
-    const hexToRgb = (hex: string) => {
-      const h = hex.replace("#", "");
-      const n = parseInt(h, 16);
-      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
-    };
-    const rgbToHex = (r: number, g: number, b: number) =>
-      "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
     const a = hexToRgb(c1), b = hexToRgb(c2);
     return rgbToHex(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t);
   };
@@ -114,21 +82,19 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
     const [p1, c1] = stops[i];
     const [p2, c2] = stops[i + 1];
     smoothStops.push([p1, c1]);
-    // add 2 intermediate colors
-    for (let k = 1; k <= 2; k++) {
-      const t = k / 3;
+    for (let k = 1; k <= 4; k++) {
+      const t = k / 5;
       smoothStops.push([p1 + (p2 - p1) * t, interp(c1, c2, t)]);
     }
   }
   smoothStops.push(stops[stops.length - 1]);
 
-  // ensure monotonic increasing and unique colors per stop
+  // unique & monotonic
   const uniq: [number, string][] = [];
   let last = -1;
   for (const [p, c] of smoothStops) {
     const pos = Math.max(0, Math.min(1, Number.isFinite(p) ? p : 0));
-    if (pos < last) continue;
-    if (pos === last) continue;
+    if (pos <= last) continue;
     uniq.push([pos, c]);
     last = pos;
   }
