@@ -28,4 +28,23 @@ export function buildAllFacades(segments: Segment[], buildingHeight: number, Rma
 	return out;
 }
 
-export default { buildFacadeElementsForSegment, buildAllFacades };
+/**
+	 * helper: compute perp signed (positive outside) and along distance and normalized t
+	 */
+export function getPerpAlong(px: number, pz: number, a: number[], b: number[]) {
+	const dx = b[0] - a[0], dz = b[1] - a[1];
+	const segLen = Math.hypot(dx, dz);
+	if (segLen < 1e-8) return { perp: -Infinity, along: 0, segLen: 0, tx: 0, tz: 0, nx: 0, nz: 0 };
+	const tx = dx / segLen, tz = dz / segLen;
+	let nx = -tz, nz = tx;
+	const vecX = px - a[0], vecZ = pz - a[1];
+	const tRaw = (vecX * tx + vecZ * tz);
+	const clamped = Math.max(0, Math.min(segLen, tRaw));
+	const projX = a[0] + tx * clamped;
+	const projZ = a[1] + tz * clamped;
+	const offX = px - projX, offZ = pz - projZ;
+	const perp = offX * nx + offZ * nz;
+	return { perp, along: clamped, t: clamped / segLen, segLen, tx, tz, nx, nz };
+}
+
+export default { buildFacadeElementsForSegment, buildAllFacades, getPerpAlong };

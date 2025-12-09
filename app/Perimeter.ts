@@ -18,7 +18,7 @@ export default class PerimeterExtractor {
 		if (points.length === 0) return points;
 		const center = points.reduce((acc, [x, z]) => [acc[0] + x / points.length, acc[1] + z / points.length], [0, 0]);
 		points.sort((a, b) => Math.atan2(a[1] - center[1], a[0] - center[0]) - Math.atan2(b[1] - center[1], b[0] - center[0]));
-		return points;
+		return points.reverse(); // sentido antihorario para normales correctas
 	}
 
 	// New: build edge loops from EdgesGeometry, return array of loops (each loop is array of [x,z])
@@ -325,6 +325,51 @@ export default class PerimeterExtractor {
 			segs.push({ name: `segment-${i}`, p1: [a[0], a[1]], p2: [b[0], b[1]] });
 		}
 		return segs;
+	}
+
+	/**
+	 * createDefaultLwMap
+	 * - Genera un mapa Lw por nombre de segmento.
+	 * - Por defecto asigna `primaryDb` (por ejemplo 100 dB) al segmento indicado por `primaryIndex`
+	 *   y `defaultForOthers` (por ejemplo 0 dB) al resto.
+	 */
+	static createDefaultLwMap(
+		segments: { name: string }[],
+		primaryDb = 100,
+		defaultForOthers = 0,
+		primaryIndex = 0
+	): Record<string, number> {
+		const map: Record<string, number> = {};
+		if (!Array.isArray(segments) || segments.length === 0) return map;
+		for (let i = 0; i < segments.length; i++) {
+			const name = String(segments[i].name);
+			map[name] = (i === primaryIndex) ? Number(primaryDb) : Number(defaultForOthers);
+		}
+		return map;
+	}
+
+	/**
+	 * ensureLwMapDefaults
+	 * - Rellena un LwMap existente para que tenga entradas para todos los segmentos.
+	 * - No sobrescribe entradas ya presentes a menos que overwrite === true.
+	 * - Útil cuando la UI inicializa sliders con valores distintos y quieres forzar los defaults.
+	 */
+	static ensureLwMapDefaults(
+		lwMap: Record<string, number> | null | undefined,
+		segments: { name: string }[],
+		primaryDb = 100,
+		defaultForOthers = 0,
+		primaryIndex = 0,
+		overwrite = false
+	): Record<string, number> {
+		const map: Record<string, number> = lwMap ? { ...lwMap } : {};
+		for (let i = 0; i < segments.length; i++) {
+			const name = String(segments[i].name);
+			if (!Object.prototype.hasOwnProperty.call(map, name) || overwrite) {
+				map[name] = (i === primaryIndex) ? Number(primaryDb) : Number(defaultForOthers);
+			}
+		}
+		return map;
 	}
 
 	/**

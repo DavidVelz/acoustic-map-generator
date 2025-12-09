@@ -4,12 +4,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
-import PerimeterExtractor from "./Perimeter";
-import { buildHeatmap } from "./map/MapBuilder";
-import { getBuildingConfig, defaultParams } from "./config";
 import { buildThresholdColorscale } from "./acoustics/ColorMap";
 import { createLShapeExtrudeGeometry } from "./geometry/building";
 import ControlsPanel from "./ControlsPanel";
+import { generateRedHeatmapFromFacade } from "./acoustics/ColorMap";
+import PerimeterExtractor from "./Perimeter";
+import { defaultParams, getBuildingConfig } from "./config";
 
 export default function Home() {
 	const [config, setConfig] = useState(getBuildingConfig("L"));
@@ -17,8 +17,8 @@ export default function Home() {
 	const [params, setParams] = useState(defaultParams);
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [texture, setTexture] = useState<THREE.Texture | null>(null);
-	const [showEmit, setShowEmit] = useState(false);
-	const [emitPoints, setEmitPoints] = useState<any[]>([]);
+	// const [showEmit, setShowEmit] = useState(false);
+	// const [emitPoints, setEmitPoints] = useState<any[]>([]);
 	const hiddenDivRef = useRef<HTMLDivElement | null>(null);
 
 	const lShapeMesh = useMemo(() => createLShapeExtrudeGeometry(config.footprint, config.buildingHeight), [config.footprint, config.buildingHeight]);
@@ -56,15 +56,59 @@ export default function Home() {
 	);
 
 	const heatmap = useMemo(() => {
-		// Delegamos la construcción del mapa a module dedicado
-		return buildHeatmap(finalLoop, config, building, params, refreshKey);
-	}, [config, finalLoop, building, params, refreshKey]);
+		// Antes: return buildHeatmap(finalLoop, config, building, params, refreshKey);
+		// Ahora: generar grilla y llamar a generateRedHeatmapFromFacade directamente
+		if (!finalLoop || finalLoop.length < 3) return { x: [], y: [], z: [[]], min: NaN, max: NaN };
 
-	// capture emit points produced by MapBuilder (if any)
-	useEffect(() => {
-		const eps = (heatmap && (heatmap as any).emitPoints) ? (heatmap as any).emitPoints : [];
-		setEmitPoints(Array.isArray(eps) ? eps : []);
-	}, [heatmap]);
+		// construir segments a partir de la geometría (nombres segment-0..)
+		const segments = PerimeterExtractor.extractFacadesSegments(lShapeMesh);
+
+		// construir lwMap desde building.LwBySegment si existe
+		const lwMap: Record<string, number> = {};
+		if (Array.isArray((building as any).LwBySegment)) {
+			const arr = (building as any).LwBySegment;
+			for (let i = 0; i < arr.length; i++) {
+				lwMap[`segment-${i}`] = Number(arr[i]?.value ?? 0);
+			}
+		}
+
+		// grid según config
+		const res = Number(config.resolution ?? 60);
+		const area = Number(config.areaSize ?? 120);
+		const dx = area / Math.max(1, res);
+		const half = area / 2;
+		const gridX = Array.from({ length: res }, (_, idx) => -half + dx * (idx + 0.5));
+		const gridY = Array.from({ length: res }, (_, idx) => -half + dx * (idx + 0.5));
+
+		// opciones tomadas desde params (fallbacks seguros)
+		const overlayCfg = (params as any)?.colorOverlay ?? {};
+		const opts = {
+			sampleSpacing: params.sourceSpacing ?? (params as any)?.cellSize ?? 1,
+			outwardOffset: 0.02,
+			redMaxDist: overlayCfg?.redMaxDist ?? 2.0,
+			yellowMaxDist: overlayCfg?.yellowMaxDist ?? (overlayCfg?.redMaxDist ?? 2.0) * 3,
+			dbPerMeter:  0.5,
+			redWeight: 1.0,
+			yellowWeight: 0.6,
+			applyYellowBlur: overlayCfg?.overlaySmoothSize ?? 2
+		};
+
+		const zmat = generateRedHeatmapFromFacade(gridX, gridY, segments, finalLoop, lwMap, opts);
+
+		// compute min/max ignoring -Infinity
+		let zmin = Infinity, zmax = -Infinity;
+		for (let j = 0; j < zmat.length; j++) {
+			for (let i = 0; i < zmat[j].length; i++) {
+				const v = zmat[j][i];
+				if (!Number.isFinite(v)) continue;
+				if (v < zmin) zmin = v;
+				if (v > zmax) zmax = v;
+			}
+		}
+		if (zmin === Infinity) { zmin = NaN; zmax = NaN; }
+
+		return { x: gridX, y: gridY, z: zmat, min: zmin, max: zmax };
+	}, [config, finalLoop, building, params, refreshKey, lShapeMesh]);
 
 	useEffect(() => {
 		let mounted = true;
@@ -165,14 +209,11 @@ export default function Home() {
  	return (
  		<div style={{ width: "100vw", height: "100vh", margin: 0, padding: 0, background: "#222", overflow: "hidden" }}>
 			<ControlsPanel
-			building={building}
-			setBuilding={setBuilding}
-			params={params}
-			setParams={setParams}
-			setRefreshKey={setRefreshKey}
-			showEmit={showEmit}
-				setShowEmit={setShowEmit}
-				emitPoints={emitPoints}
+				building={building}
+				setBuilding={setBuilding}
+				params={params}
+				setParams={setParams}
+				setRefreshKey={setRefreshKey}
 			/>
  
 			<Canvas camera={{ position: [30, 20, 30], fov: 45 }} style={{ width: "100%", height: "100%" }}>
@@ -190,6 +231,12 @@ export default function Home() {
 				{/* Building edges (wireframe) — positioned so base sits on the plane (buildingHeight/2) */}
 				{lShapeMesh && (
 					<group position={[0, config.buildingHeight / 2, 0]} rotation={[Math.PI / 2, 0, 0]} renderOrder={1000}>
+						{/* Filled, opaque extrusion (non-transparent) */}
+						<mesh geometry={lShapeMesh} castShadow receiveShadow renderOrder={1000}>
+							<meshStandardMaterial color={0x999999} metalness={0.1} roughness={0.6} transparent={false} />
+						</mesh>
+
+						{/* Wireframe on top for crisp edges */}
 						<primitive
 							object={new (THREE as any).LineSegments(
 								new (THREE as any).EdgesGeometry(lShapeMesh),
@@ -211,12 +258,7 @@ export default function Home() {
 					</group>
 				)}
 
-				{showEmit && emitPoints && emitPoints.map((pt, idx) => (
-					<mesh key={idx} position={[pt.pos ? pt.pos[0] : pt[0], 0.02, pt.pos ? pt.pos[1] : pt[1]]} renderOrder={2000}>
-						<sphereGeometry args={[0.12, 8, 8]} />
-						<meshStandardMaterial emissive={0xff0000} color={0xff4444} />
-					</mesh>
-				))}
+				{/* debug emit points removed */}
 
 				<OrbitControls />
 			</Canvas>

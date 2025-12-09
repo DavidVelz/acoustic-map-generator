@@ -24,7 +24,8 @@ export function buildHeatmap(finalLoop: number[][], config: any, building: any, 
 	const LwObj: Record<string, number> = {};
 	const segments = (building as any).LwBySegment || [];
 	segments.forEach((lw: any, idx: number) => {
-		LwObj[`segment-${idx}`] = lw?.value ?? 50;
+		// Use 0 dB as default (no emission) to avoid a uniform background source.
+		LwObj[`segment-${idx}`] = Number.isFinite(Number(lw?.value)) ? Number(lw.value) : 0;
 	});
 
 	// Si exactamente una fachada tiene Lw>0, aplicar presets visuales (como antes)
@@ -38,7 +39,7 @@ export function buildHeatmap(finalLoop: number[][], config: any, building: any, 
 			...(params || {}),
 			colorOverlay: {
 				...(params && (params as any).colorOverlay),
-				overlaySmoothSize: 13,
+				overlaySmoothSize: 0,
 				overlaySmoothSigma: 3.6,
 				lateralSpreadFactor: 1.5,
 				colorSpread: { ...(params && (params as any).colorOverlay?.colorSpread), yellow: 3.4, green: 5.0, blue: 8.0 },

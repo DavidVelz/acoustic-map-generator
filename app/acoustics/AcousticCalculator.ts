@@ -46,6 +46,7 @@ type ComputeCfg = {
     Df_out?: number;
     Rmap?: Record<string, number>; // R per segment if available
     Lp_in_map?: Record<string, number>; // optional Lp_in by room to compute Lw_room
+    invertNormals?: boolean;
   };
 };
 
@@ -130,7 +131,7 @@ export default class AcousticCalculator {
         const segName = bestSeg.seg.name;
         let Lw_room = Number(cfg.Lw?.[segName] ?? NaN);
         if (!Number.isFinite(Lw_room) && cfg.params?.Lp_in_map && Number.isFinite(cfg.params.Lp_in_map[segName])) {
-          Lw_room = ISOModel.computeLwRoomFromLpIn(cfg.params.Lp_in_map[segName], (facadeMap[segName]?.reduce((s,e)=>s+e.area,0)||1));
+          Lw_room = ISOModel.computeLwRoomFromLpIn(cfg.params.Lp_in_map[segName], (facadeMap[segName]?.reduce((s, e) => s + e.area, 0) || 1));
         }
         if (!Number.isFinite(Lw_room)) {
           // fallback nominal
@@ -153,11 +154,11 @@ export default class AcousticCalculator {
     }
 
     // smoothing pipeline (pre/final) using GaussianSmoother
-    const preSize = cfg.params?.preSmoothSize ?? 3;
+    const preSize = cfg.params?.preSmoothSize ?? 0;
     const preSigma = cfg.params?.preSmoothSigma ?? 1.2;
     let smoothed = GaussianSmoother.apply(output, preSize, preSigma);
 
-    const finalSize = cfg.params?.finalSmoothSize ?? 3;
+    const finalSize = cfg.params?.finalSmoothSize ?? 0;
     const finalSigma = cfg.params?.finalSmoothSigma ?? 0.8;
     smoothed = GaussianSmoother.apply(smoothed, finalSize, finalSigma);
 
@@ -179,7 +180,7 @@ export default class AcousticCalculator {
       const RePrime = RePrimeMap[segName] ?? 30;
 
       // decide bands
-      const bands: ("red"|"yellow"|"green"|"blue")[] = ["blue","green"];
+      const bands: ("red" | "yellow" | "green" | "blue")[] = ["blue", "green"];
       const yellowT = Number(overlayParams.yellowThreshold ?? 50);
       if (Lw_room >= yellowT) bands.push("yellow");
       if (Lw_room >= redThreshold) bands.push("red");
@@ -193,10 +194,11 @@ export default class AcousticCalculator {
           lateralTaper: overlayParams.lateralTaper,
           colorSpread: overlayParams.colorSpread,
           propagation: overlayParams.propagation,
-          // nuevos parámetros de calibración
           normalize: (overlayParams && (overlayParams as any).normalize) ?? (cfg.params && (cfg.params as any).normalize) ?? "per_meter",
           redSampleSpacing: (overlayParams && (overlayParams as any).redSampleSpacing) ?? 0.12,
           dotThreshold: (overlayParams && (overlayParams as any).dotThreshold) ?? -0.18,
+          // <-- nuevo:
+          invertNormals: cfg.params?.invertNormals ?? false,
           poly: cfg.poly ?? null,
           center: { x: centroidX, y: centroidY },
           debugEmit: overlayParams && (overlayParams as any).debugEmit,
@@ -274,9 +276,9 @@ export default class AcousticCalculator {
                 tFrac: t // unclamped
               };
             }
-            
-                        const proj = projectOnSegment(px, pz, ax, az, bx, bz);
-                        const { segLen, tClamped, closestX, closestZ, tFrac } = proj;
+
+            const proj = projectOnSegment(px, pz, ax, az, bx, bz);
+            const { segLen, tClamped, closestX, closestZ, tFrac } = proj;
             // Allow larger fractional tolerance around segment ends to blend corners better
             const tFracTol = 0.08; // ~8% tolerance along segment
             if (tFrac < -tFracTol || tFrac > 1 + tFracTol) continue;
@@ -312,7 +314,18 @@ export default class AcousticCalculator {
             // Final probe: if the outward probe (closest + normal) STILL lies inside polygon, skip this facade contribution
             const finalProbeX = closestX + nx * probeStep;
             const finalProbeZ = closestZ + nz * probeStep;
-            if (cfg.poly && cfg.poly.length && pointInPolygon(finalProbeX, finalProbeZ, cfg.poly)) continue;
+            if (cfg.poly && cfg.poly.length && pointInPolygon(finalProbeX, finalProbeZ, cfg.poly)) {
+              // LOGO DE VALIDACIÓN DE NORMAL
+              console.log(
+                `[NORMAL ERROR] Segmento: ${seg.name} | Punto: (${closestX.toFixed(2)}, ${closestZ.toFixed(2)}) | Normal: (${nx.toFixed(2)}, ${nz.toFixed(2)}) => MAL ORIENTADA`
+              );
+              continue;
+            } else {
+              // LOGO DE VALIDACIÓN DE NORMAL
+              console.log(
+                `[NORMAL OK] Segmento: ${seg.name} | Punto: (${closestX.toFixed(2)}, ${closestZ.toFixed(2)}) | Normal: (${nx.toFixed(2)}, ${nz.toFixed(2)}) => BIEN ORIENTADA`
+              );
+            }
             // --- END REPLACED ---
 
             const offX = px - closestX, offZ = pz - closestZ;
@@ -334,6 +347,7 @@ export default class AcousticCalculator {
             // frontal check using oriented normal
             const perp = offX * nx + offZ * nz;
             if (perp <= 0) continue;
+
 
             if (distFront > redRadius && distFront > (overlayParams?.blueRadius ?? 20)) continue;
 
@@ -420,3 +434,4 @@ export default class AcousticCalculator {
     return { x: xs, y: ys, z: zForPlot, min: finalMinAfter, max: finalMaxAfter, poly: cfg.poly ?? [] };
   }
 }
+

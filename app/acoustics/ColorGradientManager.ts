@@ -1,188 +1,151 @@
-import { pointInPolygon } from "./GradientFactory";
-
 export type ColorGradientOptions = {
-  redThreshold?: number;
-  yellowThreshold?: number;
-  greenThreshold?: number;
-  yellowSpread?: number;
-  redRadius?: number;
-  redDecay?: number;
-  overlaySmoothSize?: number;
-  overlaySmoothSigma?: number;
-  directionalConeAngle?: number;
-  lateralSpreadFactor?: number; // NEW: cuánto se extiende lateralmente respecto al segmento
-  colorSpread?: { red?: number; yellow?: number; green?: number; blue?: number }; // optional tuning
+	redRadius?: number;
+	redDecay?: number;
+	// nuevos parámetros físicos y de muestreo
+	maxDist?: number; // máximo alcance para rojo (m)
+	dbPerMeter?: number; // dB/m atenuación adicional (atm./difusión)
+	sampleSpacing?: number; // m entre emisores a lo largo de la fachada
+	sigmaAlongFactor?: number; // factor para sigma a lo largo (sigma_along = segLen * factor)
+	// opcional: pérdidas de fachada (Re' o similar) por nombre de segmento en dB
+	facadeLossMap?: Record<string, number>;
 };
 
 export type Segment = {
-  name: string;
-  p1: number[];
-  p2: number[];
+	name: string;
+	p1: number[];
+	p2: number[];
 };
 
 export default class ColorGradientManager {
-  private opts: Required<ColorGradientOptions>;
-  private center?: { x: number; z: number };
+	private opts: Required<ColorGradientOptions>;
 
+	constructor(options?: ColorGradientOptions) {
+		this.opts = {
+			redRadius: options?.redRadius ?? 2.0,
+			redDecay: options?.redDecay ?? 8.0,
+			maxDist: options?.maxDist ?? 2.0,
+			dbPerMeter: options?.dbPerMeter ?? 0.5,
+			sampleSpacing: options?.sampleSpacing ?? 0.25,
+			sigmaAlongFactor: options?.sigmaAlongFactor ?? 0.25,
+			facadeLossMap: options?.facadeLossMap ?? {}
+		};
+	}
 
+	// Compute the shortest distance from point (px, pz) to segment (x1, z1)-(x2, z2)
+	private pointToSegmentDist(px: number, pz: number, x1: number, z1: number, x2: number, z2: number): number {
+		const dx = x2 - x1;
+		const dz = z2 - z1;
+		if (dx === 0 && dz === 0) {
+			return Math.hypot(px - x1, pz - z1);
+		}
+		const t = ((px - x1) * dx + (pz - z1) * dz) / (dx * dx + dz * dz);
+		const tClamped = Math.max(0, Math.min(1, t));
+		const closestX = x1 + tClamped * dx;
+		const closestZ = z1 + tClamped * dz;
+		return Math.hypot(px - closestX, pz - closestZ);
+	}
 
-  // Compute the shortest distance from point (px, pz) to segment (x1, z1)-(x2, z2)
-  private pointToSegmentDist(px: number, pz: number, x1: number, z1: number, x2: number, z2: number): number {
-    const dx = x2 - x1;
-    const dz = z2 - z1;
-    if (dx === 0 && dz === 0) {
-      // Segment is a point
-      return Math.hypot(px - x1, pz - z1);
-    }
-    // Project point onto segment, clamp to segment
-    const t = ((px - x1) * dx + (pz - z1) * dz) / (dx * dx + dz * dz);
-    const tClamped = Math.max(0, Math.min(1, t));
-    const closestX = x1 + tClamped * dx;
-    const closestZ = z1 + tClamped * dz;
-    return Math.hypot(px - closestX, pz - closestZ);
-  }
+	/**
+	 * computeGradientValue — modelo físico simplificado por fachada.
+	 * - Muestrea fachadas en emisores.
+	 * - Calcula Lp por muestra y aplica ponderación elíptica (perp + along).
+	 * - Suma energía lineal y convierte a dB.
+	 */
+	computeGradientValue(
+		px: number,
+		pz: number,
+		segments: Segment[],
+		LwMap: Record<string, number>,
+		isInsidePerimeter: boolean
+	): number {
+		if (isInsidePerimeter) return -Infinity;
 
-  constructor(options?: ColorGradientOptions) {
-    this.opts = {
-      redThreshold: options?.redThreshold ?? 60,
-      yellowThreshold: options?.yellowThreshold ?? 50,
-      greenThreshold: options?.greenThreshold ?? 40,
-      yellowSpread: options?.yellowSpread ?? 5.0,
-      redRadius: options?.redRadius ?? 2.0,
-      redDecay: options?.redDecay ?? 8.0,
-      overlaySmoothSize: options?.overlaySmoothSize ?? 5,
-      overlaySmoothSigma: options?.overlaySmoothSigma ?? 1.2,
-      directionalConeAngle: options?.directionalConeAngle ?? 70,
-      lateralSpreadFactor: options?.lateralSpreadFactor ?? 0.25, // fraction of segment length allowed either side (25%)
-      colorSpread: options?.colorSpread ?? { red: 1, yellow: 2.8, green: 4, blue: 6 }
-    };
-  }
+		// parámetros desde opts
+		const maxDist = this.opts.maxDist;
+		const dbPerMeter = this.opts.dbPerMeter;
+		const sampleSpacing = this.opts.sampleSpacing;
+		const sigmaAlongFactor = this.opts.sigmaAlongFactor;
+		const facadeLossMap = this.opts.facadeLossMap;
 
-  // compute centroid of polygon (simple average of vertices)
-  private computeCentroid(poly: number[][]) {
-    if (!poly || poly.length === 0) return { x: 0, z: 0 };
-    let sx = 0, sz = 0;
-    for (const p of poly) { sx += p[0]; sz += p[1]; }
-    return { x: sx / poly.length, z: sz / poly.length };
-  }
+		// constante 10*log10(4π) para conversión de potencia a presión (simplificación)
+		const FOUR_PI_CONST = 10 * Math.log10(4 * Math.PI);
+		const minDist = 0.01;
 
-  /**
-   * computeGradientValue:
-   * - calcula contribución de todos los segmentos en la celda (px,pz)
-   * - usa distancia perpendicular pura y una ponderación lateral (gaussiana)
-   * - no excluye rigidamente esquinas; reduce huecos por solapamiento
-   */
-  computeGradientValue(
-    px: number,
-    pz: number,
-    segments: Segment[],
-    LwMap: Record<string, number>,
-    isInsidePerimeter: boolean
-  ): number {
-    if (isInsidePerimeter) return -Infinity;
+		// centroid simple para orientar normales hacia afuera
+		const center = (() => {
+			let sx = 0, sz = 0, c = 0;
+			for (const s of segments) {
+				if (!s || !s.p1 || !s.p2) continue;
+				const ax = s.p1[0], az = s.p1[1], bx = s.p2[0], bz = s.p2[1];
+				sx += (ax + bx) * 0.5; sz += (az + bz) * 0.5; c++;
+			}
+			return c ? { x: sx / c, z: sz / c } : { x: 0, z: 0 };
+		})();
 
-    let maxContribution = -Infinity;
+		let totalE = 0; // energía lineal acumulada
 
-    for (const seg of segments) {
-      const lw = LwMap[seg.name];
-      if (lw == null || isNaN(lw) || lw <= 0) continue;
+		for (const seg of segments) {
+			const Lw_seg = Number(LwMap[seg.name]);
+			if (!Number.isFinite(Lw_seg) || Lw_seg <= 0) continue;
 
-      const a = seg.p1, b = seg.p2;
+			const a = seg.p1, b = seg.p2;
+			const dx = b[0] - a[0], dz = b[1] - a[1];
+			const segLen = Math.hypot(dx, dz);
+			if (segLen < 1e-6) continue;
 
-      // 1. Vector tangente del segmento (normalizado)
-      const dx = b[0] - a[0], dz = b[1] - a[1];
-      const segLen = Math.hypot(dx, dz);
-      if (segLen < 1e-6) continue;
+			// tangente y normal (orientar normal hacia afuera)
+			const tx = dx / segLen, tz = dz / segLen;
+			let nx = -tz, nz = tx;
+			const midX = (a[0] + b[0]) / 2, midZ = (a[1] + b[1]) / 2;
+			if (((midX - center.x) * nx + (midZ - center.z) * nz) < 0) { nx = -nx; nz = -nz; }
 
-      const tx = dx / segLen, tz = dz / segLen; // tangente unitaria
+			// muestreo a lo largo de la fachada
+			const nSamples = Math.max(1, Math.ceil(segLen / sampleSpacing));
+			const P_total = Math.pow(10, Lw_seg / 10); // energía lineal del segmento
+			const P_per_sample = P_total / nSamples;
 
-      // 2. Normal perpendicular (rotación 90° CCW del tangente)
-      let nx = -tz, nz = tx;
+			// pérdida de transmisión de fachada (si existe)
+			const facadeLoss = Number.isFinite(Number(facadeLossMap[seg.name])) ? Number(facadeLossMap[seg.name]) : 0;
 
-      // 3. Verificar orientación: la normal debe apuntar hacia afuera
-      const midX = (a[0] + b[0]) / 2, midZ = (a[1] + b[1]) / 2;
-      if (midX * nx + midZ * nz < 0) { nx = -nx; nz = -nz; }
+			for (let s = 0; s < nSamples; s++) {
+				const frac = (s + 0.5) / nSamples;
+				const sx = a[0] + tx * segLen * frac;
+				const sz = a[1] + tz * segLen * frac;
 
-      // 4. Proyectar el punto sobre el eje del segmento (componente paralela)
-      const vecX = px - a[0], vecZ = pz - a[1];
-      const tParam = (vecX * tx + vecZ * tz); // posición a lo largo del segmento
+				const vrx = px - sx, vrz = pz - sz;
+				const dist = Math.hypot(vrx, vrz);
+				const perp = vrx * nx + vrz * nz;
+				// solo contribuye si está hacia afuera y dentro de maxDist
+				if (perp <= 0 || perp > maxDist) continue;
 
-      // 5. ESTRICTO: solo aplicar si está EXACTAMENTE frente al segmento (sin extensión)
-      // Tolerancia mínima para evitar que gradientes crucen esquinas
-      const tolerance = segLen * 0.05; // 5% del segmento
-      if (tParam < -tolerance || tParam > segLen + tolerance) continue;
+				const dClamp = Math.max(minDist, dist);
+				// pérdida geométrica + constante
+				const geomLoss = 20 * Math.log10(dClamp) + FOUR_PI_CONST;
+				const atmosLoss = dbPerMeter * dClamp;
 
-      // 6. Calcular punto sobre el segmento más cercano al punto
-      const clampedT = Math.max(0, Math.min(segLen, tParam));
-      const projX = a[0] + tx * clampedT;
-      const projZ = a[1] + tz * clampedT;
+				// Lp por muestra (dB)
+				const Lp_sample_db = 10 * Math.log10(Math.max(1e-12, P_per_sample)) - geomLoss - atmosLoss - facadeLoss;
 
-      // 7. Vector desde punto proyectado hacia el punto receptor
-      const offX = px - projX, offZ = pz - projZ;
+				// ponderación elíptica: perpendicular + along (centro segment)
+				// usar distancia perpendicular para la atenuación acústica (para cubrir toda la longitud)
+				const distancePerp = Math.max(minDist, Math.abs(perp));
+				// sigma perpendicular aumentado para cubrir anchura mayor (ajustable)
+				const sigma_perp = Math.max(0.5, Math.max(maxDist * 0.9, segLen * 0.25));
+				const w_perp = Math.exp(- (perp * perp) / (2 * sigma_perp * sigma_perp));
+				const w_along = 1.0; // do not attenuate along the facade
+				const weight = w_perp * w_along;
 
-      // 8. Distancia perpendicular FIRMADA (proyección sobre normal)
-      const perpDist = offX * nx + offZ * nz;
+				// usar distancePerp (no euclidiana) para el cálculo acústico (evita caída a lo largo)
+				const Lp_sample_db_adj = 10 * Math.log10(Math.max(1e-12, P_per_sample)) - (20 * Math.log10(distancePerp) + FOUR_PI_CONST) - (dbPerMeter * distancePerp) - facadeLoss;
+				const E_sample = Math.pow(10, Lp_sample_db_adj / 10) * weight;
+				totalE += E_sample;
+			}
+		}
 
-      // 9. Solo aplicar si está hacia afuera (perpDist > 0) y dentro del radio
-      if (perpDist <= 0 || perpDist > this.opts.redRadius) continue;
-
-      // 10. NUEVA RESTRICCIÓN: verificar que no estamos cerca de otra fachada
-      // (esto evita que el gradiente "envuelva" esquinas)
-      let tooCloseToOtherFacade = false;
-      for (const otherSeg of segments) {
-        if (otherSeg.name === seg.name) continue; // skip mismo segmento
-        const oa = otherSeg.p1, ob = otherSeg.p2;
-        // distancia al otro segmento
-        const distToOther = this.pointToSegmentDist(px, pz, oa[0], oa[1], ob[0], ob[1]);
-        // si estamos MUY cerca de otra fachada, no aplicar este gradiente
-        if (distToOther < perpDist * 0.3) { // 30% de la distancia perpendicular
-          tooCloseToOtherFacade = true;
-          break;
-        }
-      }
-      if (tooCloseToOtherFacade) continue;
-
-      // 11. Contribución LINEAL PURA: solo función de perpDist
-      const contribution = Math.max(0, lw - this.opts.redDecay * perpDist);
-
-      if (contribution > maxContribution) {
-        maxContribution = contribution;
-      }
-    }
-
-    return maxContribution;
-  }
-
-  /**
-   * applyGradient:
-   * - aplica computeGradientValue a toda la rejilla (xs x ys)
-   * - no suaviza acá (se controla desde caller con overlaySmoothSize)
-   */
-  applyGradient(
-    xs: number[],
-    ys: number[],
-    baseGrid: number[][],
-    segments: Segment[],
-    LwMap: Record<string, number>,
-    polyLoop: number[][]
-  ): number[][] {
-    // compute and store centroid once so orientation uses polygon center (avoids normal flips)
-    this.center = this.computeCentroid(polyLoop);
-    const resX = xs.length;
-    const resY = ys.length;
-
-    const overlay: number[][] = Array.from({ length: resY }, (_, j) => baseGrid[j].slice());
-
-    for (let j = 0; j < resY; j++) {
-      for (let i = 0; i < resX; i++) {
-        const px = xs[i], pz = ys[j];
-        const isInside = pointInPolygon(px, pz, polyLoop);
-        const gradValue = this.computeGradientValue(px, pz, segments, LwMap, isInside);
-        // Add logic here if needed, or remove the incomplete 'if' statement
-        // Example: overlay[j][i] = gradValue;
-        overlay[j][i] = gradValue;
-      }
-    }
-    return overlay;
-  }
+		if (totalE <= 0) return -Infinity;
+		const Lp_total_db = 10 * Math.log10(totalE);
+		return Number.isFinite(Lp_total_db) ? Lp_total_db : -Infinity;
+	}
 }
+
+// Nota: 'blue' en colorSpread se interpreta como cyan en la paleta (ajustado en ColorMap.ts)

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { getBuildingConfig, defaultParams } from "./config";
 
 type Props = {
@@ -7,13 +7,30 @@ type Props = {
   params: any;
   setParams: (p: any) => void;
   setRefreshKey: (fn: (k: number) => number) => void;
-  showEmit: boolean;
-  setShowEmit: (v: boolean) => void;
-  emitPoints: any[];
 };
 
-export default function ControlsPanel({ building, setBuilding, params, setParams, setRefreshKey, showEmit, setShowEmit, emitPoints }: Props) {
-  return (
+export default function ControlsPanel({ building, setBuilding, params, setParams, setRefreshKey }: Props) {
+
+	// Inicializa LwBySegment como cuadrado: segment-0 = 100, resto = 0
+	useEffect(() => {
+		if (!building) return;
+		const segCount = 4; // cuadrado: 4 segmentos
+		const existing = (building as any).LwBySegment;
+		let needInit = false;
+		if (!Array.isArray(existing) || existing.length !== segCount) {
+			needInit = true;
+		} else {
+			for (let i = 0; i < existing.length; i++) {
+				if (typeof existing[i]?.value !== "number") { needInit = true; break; }
+			}
+		}
+		if (needInit) {
+			const arr = Array.from({ length: segCount }, (_, i) => ({ value: i === 0 ? 100 : 0 }));
+			setBuilding((b: any) => ({ ...b, LwBySegment: arr }));
+		}
+	}, [building, setBuilding]);
+
+    return (
     <div style={{ position: "absolute", left: 12, top: 12, background: "rgba(0,0,0,0.75)", padding: 12, borderRadius: 8, color: "#fff", fontFamily: "sans-serif", zIndex: 1100, width: 360 }}>
       <div style={{ fontSize: 13, marginBottom: 8, fontWeight: 700 }}>Ajustes (Lw por Segmento)</div>
 
@@ -103,6 +120,43 @@ export default function ControlsPanel({ building, setBuilding, params, setParams
         <div style={{ width: 36, textAlign: "right", fontSize: 11 }}>{((params.colorOverlay as any).yellowMaxDist ?? 6.0).toFixed(1)}</div>
       </div>
 
+      {/* Dot threshold (normal / halo relax) */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+        <label style={{ width: 140, fontSize: 12 }}>Dot threshold</label>
+        <input
+          type="range"
+          min={-1}
+          max={1}
+          step={0.01}
+          value={(params.colorOverlay as any).dotThreshold ?? ((defaultParams as any).colorOverlay.dotThreshold ?? -0.18)}
+          onChange={(e) => {
+            const v = Number(e.target.value || 0);
+            setParams((p:any) => ({ ...p, colorOverlay: { ...p.colorOverlay, dotThreshold: v } }));
+            setRefreshKey(k => k + 1);
+          }}
+          style={{ flex: 1 }}
+        />
+        <div style={{ width: 48, textAlign: "right", fontSize: 11 }}>{((params.colorOverlay as any).dotThreshold ?? ((defaultParams as any).colorOverlay.dotThreshold ?? -0.18)).toFixed(2)}</div>
+      </div>
+
+      {/* Invert normals (debug/test) */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <label style={{ width: 140, fontSize: 12 }}>
+          <input
+            type="checkbox"
+            checked={!!params.invertNormals}
+            onChange={(e) => {
+              const v = e.target.checked;
+              setParams((p:any) => ({ ...p, invertNormals: v }));
+              setRefreshKey(k => k + 1);
+            }}
+            style={{ marginRight: 8 }}
+          />
+          Invertir normales
+        </label>
+        <div style={{ fontSize: 11, color: "#ddd" }}>{params.invertNormals ? "ON" : "OFF"}</div>
+      </div>
+
       <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
         <button onClick={() => setRefreshKey(k => k + 1)} style={{ padding: "6px 10px", borderRadius: 6, background: "#007acc", color: "#fff", border: "none", cursor: "pointer" }}>Recalcular</button>
         <button onClick={() => { setBuilding(getBuildingConfig("L")); setParams(defaultParams); setRefreshKey(k => k + 1); }} style={{ padding: "6px 8px", borderRadius: 6, background: "#444", color: "#fff", border: "none", cursor: "pointer" }}>Reset</button>
@@ -123,13 +177,7 @@ export default function ControlsPanel({ building, setBuilding, params, setParams
         }} style={{ padding: "6px 10px", borderRadius: 6, background: "#d9534f", color: "#fff", border: "none", cursor: "pointer" }}>Apply Referente</button>
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <label style={{ width: 140, fontSize: 12 }}>
-          <input type="checkbox" checked={showEmit} onChange={(e) => setShowEmit(e.target.checked)} style={{ marginRight: 8 }} />
-          Show emit points
-        </label>
-        <div style={{ fontSize: 11, color: "#ddd" }}>{emitPoints.length} pts</div>
-      </div>
+      {/* emit points debug control removed */}
     </div>
   );
 }

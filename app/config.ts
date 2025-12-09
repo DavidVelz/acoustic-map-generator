@@ -7,8 +7,8 @@ export function getBuildingConfig(type: BuildingType = "L") {
 	const defaultLw = 30;
 	const count = segmentCounts[type] ?? 6;
 	return {
-		areaSize: 120,
-		resolution: 60,
+		areaSize: 90,   // aumentado: tamaño del "plate" (m)
+		resolution: 120, // aumentado para mantener la densidad de la grilla
 		measureH: 2.0,
 		footprint: 16.0,
 		buildingHeight: 13.0,
@@ -22,8 +22,8 @@ export function getBuildingConfig(type: BuildingType = "L") {
 export const buildingConfig = getBuildingConfig("L");
 
 export const defaultParams = {
-	spread: 100, // Reducido para un gradiente más controlado
-	maxRedDist: 12.0,
+	spread: 50, // Reducido para un gradiente más controlado
+	maxRedDist: 2.0,
 	powerFactor: 1.2,
 	weakSpotSpread: 0.3,
 	weakSpotRadius: 6.0,
@@ -32,9 +32,9 @@ export const defaultParams = {
 	weakSpotDirZ: 0,
 	// --- new control variables ---
 	// Suavizado intenso para un efecto de halo difuso
-	preSmoothSize: 15,
+	preSmoothSize: 0,
 	preSmoothSigma: 4.0,
-	finalSmoothSize: 11,
+	finalSmoothSize: 0,
 	finalSmoothSigma: 3.0,
 	// --- sampling controls (new) ---
 	// grid cell size in meters (1.0 m para un grid más grueso)
@@ -45,28 +45,29 @@ export const defaultParams = {
 	colorOverlay: {
 		// Umbrales solicitados:
 		// rojo > 70, amarillo > 50, verde > 40, azul claro 20..40, azul oscuro <20
-		redThreshold: 70,
+		redThreshold: 65,
 		yellowThreshold: 50,
 		// ancho (dB) de la banda amarilla (se usa para posicionar stops de color)
 		yellowSpread: 10.0,
 		// Suavizado del overlay (aumentado para halos más suaves)
-		overlaySmoothSize: 11,
+		overlaySmoothSize: 0,
 		overlaySmoothSigma: 3.2,
+		// ajustar verde y cyan (blueThreshold) para que cyan aparezca entre deep/green/yellow
 		greenThreshold: 40,
-		// azul claro / oscuro split
-		blueThreshold: 20,
-		redRadius: 12.0,
+		// azul/cyan threshold: posición en dB donde aparece el cyan (por defecto entre green y yellow)
+		blueThreshold: 30,
+		redRadius: 7.0,
 		redDecay: 6.0,
 		// cuánto del largo del segmento se usa como sigma lateral (fracción del segLen)
-		lateralSpreadFactor: 1.15,
+		lateralSpreadFactor: 100.15,
 		// factores que amplían la sigma lateral/longitudinal por banda de color (más anchos para verdes/azules)
-		colorSpread: { red: 1.0, yellow: 2.8, green: 4.0, blue: 6.0 },
+		colorSpread: { red: 1.0, yellow: 220.8, green: 4.0, blue: 6.0 },
 		// parámetros de propagación por banda: factor multiplicador del decay y distancia máxima
 		propagation: {
-			bandDecay: { red: 1.0, yellow: 0.6, green: 0.35 },
-			bandMaxDist: { red: 2.0, yellow: 6.0, green: 12.0 },
+			bandDecay: { red: 1.0, yellow: 36, green: 0.35 },
+			bandMaxDist: { red: 2.0, yellow: 30, green: 12.0 },
 			// multiplicador lateral adicional por banda (fine tune)
-			lateralMultiplier: { red: 1.0, yellow: 1.25, green: 1.6, blue: 2.2 }
+			lateralMultiplier: { red: 1.0, yellow: 33.25, green: 1.6, blue: 2.2 }
 		},
 		// normalización: 'per_meter' asegura igualdad entre fachadas de distinta longitud
 		normalize: "per_meter" as "per_meter" | "per_sample" | "none",
@@ -78,7 +79,7 @@ export const defaultParams = {
 		redFalloffScale: 1.2,
 		// UI-linked caps (used by the menu sliders "Red max dist" / "Yellow max dist")
 		redMaxDist: 2.0,
-		yellowMaxDist: 6.0
+		yellowMaxDist: 56.0
 	},
 	// Atenuación: omnidireccional para crear el halo
 	attenuation: {
