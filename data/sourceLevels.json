@@ -1,0 +1,9 @@
+{
+  "mode": "Lp",
+  "segments": [
+    { "name": "segment-0", "value": 75 },
+    { "name": "segment-1", "value": 60 },
+    { "name": "segment-2", "value": 60 },
+    { "name": "segment-3", "value": 60 }
+  ]
+}

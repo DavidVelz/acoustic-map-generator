@@ -3,29 +3,28 @@ import { getPerpAlong } from "./FacadeUtils";
 import WaveEmitter from "./WaveEmitter";
 
 export function getColorscale() {
-  // Deep-blue -> cyan -> green -> yellow -> red (no orange)
+  // Deep-blue -> cyan -> green -> yellow -> red
   return [
     [0.0, "#00224d"], // deep
-    [0.25, "#00cccc"], // cyan
-    [0.45, "#00cc66"], // green
+    [0.20, "#00cccc"], // cyan
+    [0.40, "#00cc66"], // green
     [0.70, "#ffff33"], // yellow
     [1.0,  "#ff0000"]  // red
   ] as [number, string][];
 }
 
-// New: build colorscale from thresholds and data range so red/yellow/green/blue
-// appear at the configured decibel levels and are normalized into [0..1] for Plotly.
+// New: build a smooth sampled colorscale avoiding sharp intermediate stops.
+// Anchors: deepBlue, cyan, green, yellow, red. Sample densely to avoid stripes.
 export function buildThresholdColorscale(zmin: number, zmax: number, thresholds: { redThreshold?: number; yellowThreshold?: number; greenThreshold?: number; blueThreshold?: number; yellowSpread?: number } | undefined) {
   if (zmax <= zmin || !thresholds) return getColorscale();
+
   const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
   const mapPos = (t: number) => {
     if (!Number.isFinite(t)) return NaN;
-    // if z-range degenerate, map into [0.02..0.98] proportionally to absolute dB range 0..100
     if (zmax - zmin < 1e-6) {
       const approx = (t / 100);
       return Math.max(0.02, Math.min(0.98, approx));
     }
-    // map threshold into normalized position with soft clamp away from edges
     const p = (t - zmin) / (zmax - zmin);
     return Math.max(0.02, Math.min(0.98, p));
   };
@@ -33,9 +32,8 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
   const redT = thresholds.redThreshold ?? 70;
   const yellowT = thresholds.yellowThreshold ?? 50;
   const greenT = thresholds.greenThreshold ?? 40;
-  // blueThreshold is treated as cyan threshold here
-  const cyanT = Number.isFinite((thresholds as any).blueThreshold) ? (thresholds as any).blueThreshold : Math.max(0, greenT - 20);
-  const yellowSpread = Number((thresholds as any).yellowSpread ?? 10);
+  // blueThreshold now positions cyan between deep and green (can be set via UI)
+  const cyanT = Number.isFinite((thresholds as any).blueThreshold) ? (thresholds as any).blueThreshold : Math.max(0, greenT - 15);
 
   const C = {
     deepBlue: "#00224d",
@@ -45,24 +43,28 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
     red: "#ff0000"
   };
 
-  // compute normalized positions (soft-clamped)
+  // anchor positions (normalized)
+  const pDeep = 0.0;
   const pCyan = mapPos(cyanT);
   const pGreen = mapPos(greenT);
   const pYellow = mapPos(yellowT);
   const pRed = mapPos(redT);
 
-  const stops: [number, string][] = [
-    [0.0, C.deepBlue],
-  ];
-  if (!Number.isNaN(pCyan))  stops.push([clamp01(pCyan),  C.cyan]);
-  if (!Number.isNaN(pGreen)) stops.push([clamp01(pGreen), C.green]);
-  if (!Number.isNaN(pYellow)) stops.push([clamp01(pYellow), C.yellow]);
-  if (!Number.isNaN(pRed))    stops.push([clamp01(pRed),    C.red]);
+  // build anchor list and ensure monotonic increasing positions
+  const anchors: { p: number; color: string }[] = [
+    { p: pDeep, color: C.deepBlue },
+    { p: pCyan, color: C.cyan },
+    { p: pGreen, color: C.green },
+    { p: pYellow, color: C.yellow },
+    { p: pRed, color: C.red }
+  ].filter(a => Number.isFinite(a.p)).sort((a, b) => a.p - b.p);
 
-  const topColor = (!Number.isNaN(pRed)) ? C.red : C.yellow;
-  stops.push([1.0, topColor]);
+  // ensure anchors cover 0..1
+  if (anchors.length === 0) return getColorscale();
+  if (anchors[0].p > 0.0) anchors.unshift({ p: 0.0, color: C.deepBlue });
+  if (anchors[anchors.length - 1].p < 1.0) anchors.push({ p: 1.0, color: anchors[anchors.length - 1].color });
 
-  // interpolate additional intermediate stops for smooth gradient
+  // helpers color conversion
   const hexToRgb = (hex: string) => {
     const h = hex.replace("#", "");
     const n = parseInt(h, 16);
@@ -70,31 +72,41 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
   };
   const rgbToHex = (r: number, g: number, b: number) =>
     "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
-  const interp = (c1: string, c2: string, t: number) => {
+
+  // interpolation between two hex colors
+  const interpColor = (c1: string, c2: string, t: number) => {
     const a = hexToRgb(c1), b = hexToRgb(c2);
     return rgbToHex(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t);
   };
 
-  const smoothStops: [number, string][] = [];
-  for (let i = 0; i < stops.length - 1; i++) {
-    const [p1, c1] = stops[i];
-    const [p2, c2] = stops[i + 1];
-    smoothStops.push([p1, c1]);
-    for (let k = 1; k <= 4; k++) {
-      const t = k / 5;
-      smoothStops.push([p1 + (p2 - p1) * t, interp(c1, c2, t)]);
+  // sample a dense colorscale to avoid banding
+  const N = 128; // number of sampled stops (adjustable)
+  const sampled: [number, string][] = [];
+  for (let i = 0; i < N; i++) {
+    const pos = i / (N - 1);
+    // find anchor interval
+    let a = anchors[0], b = anchors[anchors.length - 1];
+    for (let k = 0; k < anchors.length - 1; k++) {
+      if (pos >= anchors[k].p && pos <= anchors[k + 1].p) {
+        a = anchors[k];
+        b = anchors[k + 1];
+        break;
+      }
     }
+    const span = Math.max(1e-9, b.p - a.p);
+    const t = (pos - a.p) / span;
+    const color = interpColor(a.color, b.color, t);
+    sampled.push([clamp01(pos), color]);
   }
-  smoothStops.push(stops[stops.length - 1]);
 
-  // unique & monotonic
+  // compact: remove consecutive near-duplicates and ensure monotonic unique positions
   const uniq: [number, string][] = [];
-  let last = -1;
-  for (const [p, c] of smoothStops) {
+  let lastPos = -1;
+  for (const [p, c] of sampled) {
     const pos = Math.max(0, Math.min(1, Number.isFinite(p) ? p : 0));
-    if (pos <= last) continue;
+    if (pos <= lastPos + 1e-6) continue;
     uniq.push([pos, c]);
-    last = pos;
+    lastPos = pos;
   }
   if (uniq.length < 2) return getColorscale();
   return uniq;
