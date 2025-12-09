@@ -8,7 +8,7 @@ export function getBuildingConfig(type: BuildingType = "L") {
 	const count = segmentCounts[type] ?? 6;
 	return {
 		areaSize: 90,   // aumentado: tamaño del "plate" (m)
-		resolution: 120, // aumentado para mantener la densidad de la grilla
+		resolution: 70, // aumentado para mantener la densidad de la grilla
 		measureH: 2.0,
 		footprint: 16.0,
 		buildingHeight: 13.0,
@@ -61,7 +61,7 @@ export const defaultParams = {
 		// cuánto del largo del segmento se usa como sigma lateral (fracción del segLen)
 		lateralSpreadFactor: 100.15,
 		// factores que amplían la sigma lateral/longitudinal por banda de color (más anchos para verdes/azules)
-		colorSpread: { red: 1.0, yellow: 220.8, green: 4.0, blue: 6.0 },
+		colorSpread: { red: 1.0, yellow: 20.8, green: 4.0, blue: 6.0 },
 		// parámetros de propagación por banda: factor multiplicador del decay y distancia máxima
 		propagation: {
 			bandDecay: { red: 1.0, yellow: 36, green: 0.35 },
@@ -79,7 +79,7 @@ export const defaultParams = {
 		redFalloffScale: 1.2,
 		// UI-linked caps (used by the menu sliders "Red max dist" / "Yellow max dist")
 		redMaxDist: 2.0,
-		yellowMaxDist: 56.0
+		yellowMaxDist: 156.0
 	},
 	// Atenuación: omnidireccional para crear el halo
 	attenuation: {

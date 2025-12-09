@@ -7,9 +7,10 @@ type Props = {
   params: any;
   setParams: (p: any) => void;
   setRefreshKey: (fn: (k: number) => number) => void;
+  setConfig: (c: any) => void; // nuevo: permite actualizar la configuración global (tipo de edificio)
 };
 
-export default function ControlsPanel({ building, setBuilding, params, setParams, setRefreshKey }: Props) {
+export default function ControlsPanel({ building, setBuilding, params, setParams, setRefreshKey, setConfig }: Props) {
 
 	// Inicializa LwBySegment como cuadrado: segment-0 = 100, resto = 0
 	useEffect(() => {
@@ -29,6 +30,17 @@ export default function ControlsPanel({ building, setBuilding, params, setParams
 			setBuilding((b: any) => ({ ...b, LwBySegment: arr }));
 		}
 	}, [building, setBuilding]);
+	
+	// Nuevo control: elegir tipo de edificio (L / U / S)
+	const changeBuildingType = (type: "L" | "U" | "S") => {
+		// getBuildingConfig es importado al tope del archivo
+		const cfg = getBuildingConfig(type);
+		// marca el tipo seleccionado para que page.tsx cree la geometría adecuada
+		(cfg as any).shapeType = type;
+		setConfig(cfg);
+		setBuilding(cfg);
+		setRefreshKey(k => k + 1);
+	};
 
     return (
     <div style={{ position: "absolute", left: 12, top: 12, background: "rgba(0,0,0,0.75)", padding: 12, borderRadius: 8, color: "#fff", fontFamily: "sans-serif", zIndex: 1100, width: 360 }}>

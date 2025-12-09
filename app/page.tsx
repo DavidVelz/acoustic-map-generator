@@ -5,7 +5,7 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { buildThresholdColorscale } from "./acoustics/ColorMap";
-import { createLShapeExtrudeGeometry } from "./geometry/building";
+import { createLShapeExtrudeGeometry, createUShapeExtrudeGeometry, createSquareExtrudeGeometry } from "./geometry/building";
 import ControlsPanel from "./ControlsPanel";
 import { generateRedHeatmapFromFacade } from "./acoustics/ColorMap";
 import PerimeterExtractor from "./Perimeter";
@@ -21,7 +21,14 @@ export default function Home() {
 	// const [emitPoints, setEmitPoints] = useState<any[]>([]);
 	const hiddenDivRef = useRef<HTMLDivElement | null>(null);
 
-	const lShapeMesh = useMemo(() => createLShapeExtrudeGeometry(config.footprint, config.buildingHeight), [config.footprint, config.buildingHeight]);
+	// crear geometría según config.shapeType (por defecto 'L')
+	const lShapeMesh = useMemo(() => {
+		const shapeType = (config as any).shapeType ?? "L";
+		if (shapeType === "U") return createUShapeExtrudeGeometry(config.footprint, config.buildingHeight);
+		if (shapeType === "S") return createSquareExtrudeGeometry(config.footprint, config.buildingHeight);
+		// por defecto L
+		return createLShapeExtrudeGeometry(config.footprint, config.buildingHeight);
+	}, [config.footprint, config.buildingHeight, (config as any).shapeType]);
 
 	const baseLoop = useMemo(() => PerimeterExtractor.extractBasePerimeter(lShapeMesh), [lShapeMesh]);
 
@@ -89,7 +96,7 @@ export default function Home() {
 			yellowMaxDist: overlayCfg?.yellowMaxDist ?? (overlayCfg?.redMaxDist ?? 2.0) * 3,
 			dbPerMeter:  0.5,
 			redWeight: 1.0,
-			yellowWeight: 0.6,
+			yellowWeight: 0.1,
 			applyYellowBlur: overlayCfg?.overlaySmoothSize ?? 2
 		};
 
@@ -122,8 +129,11 @@ export default function Home() {
 			container.style.position = "absolute";
 			container.style.left = "-20000px";
 			container.style.top = "-20000px";
-			container.style.width = "1200px";
-			container.style.height = "800px";
+			// Use a square hidden container that matches the PNG size requested below (1600x1600).
+			// This keeps Plotly rendering 1:1 and avoids stretching / misalignment of the texture.
+			const PLOT_IMG_SIZE = 1600;
+			container.style.width = `${PLOT_IMG_SIZE}px`;
+			container.style.height = `${PLOT_IMG_SIZE}px`;
 		}
 
 		(async () => {
@@ -214,6 +224,7 @@ export default function Home() {
 				params={params}
 				setParams={setParams}
 				setRefreshKey={setRefreshKey}
+				setConfig={setConfig} // nuevo prop
 			/>
  
 			<Canvas camera={{ position: [30, 20, 30], fov: 45 }} style={{ width: "100%", height: "100%" }}>
