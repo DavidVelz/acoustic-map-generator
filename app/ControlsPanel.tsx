@@ -23,6 +23,18 @@ export default function ControlsPanel({ building, setBuilding, params, setParams
 	const lpToLw = (lp: number) => lp + FOUR_PI_CONST + dbPerMeter * 1.0;
 	const lwToLp = (lw: number) => lw - (FOUR_PI_CONST + dbPerMeter * 1.0);
 
+	// helper getters with safe fallbacks
+	const overlay = (params as any)?.colorOverlay ?? (defaultParams as any).colorOverlay;
+	const currentRedMax = overlay?.redMaxDist ?? 2.0;
+	const currentYellowMax = overlay?.yellowMaxDist ?? 12.0;
+	const currentBlur = overlay?.overlaySmoothSize ?? 2;
+	const currentRedThresh = overlay?.redThreshold ?? 65;
+	const currentYellowThresh = overlay?.yellowThreshold ?? 50;
+	const currentGreenThresh = overlay?.greenThreshold ?? 40;
+	const currentBlueThresh = overlay?.blueThreshold ?? 30;
+	const redWeight = (params as any)?.redWeight ?? 1.0;
+	const yellowWeight = (params as any)?.yellowWeight ?? 0.9;
+
 	return (
 		<div style={{ position: "absolute", left: 12, top: 12, background: "rgba(0,0,0,0.75)", padding: 12, borderRadius: 8, color: "#fff", fontFamily: "sans-serif", zIndex: 1100, width: 360 }}>
 			<div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
@@ -70,6 +82,75 @@ export default function ControlsPanel({ building, setBuilding, params, setParams
 					</div>
 				</div>
 			)})}
+
+			{/* --- Halo & weights --- */}
+			<div style={{ height: 8 }} />
+			<div style={{ fontSize: 13, marginBottom: 6, fontWeight: 700 }}>Halo / Pesos</div>
+
+			<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+				<label style={{ width: 140, fontSize: 12 }}>Yellow max dist (m)</label>
+				<input type="range" min={1} max={60} step={0.5} value={currentYellowMax}
+					onChange={(e) => { const v = Number(e.target.value || 0); setParams((p:any) => ({ ...p, colorOverlay: { ...p.colorOverlay, yellowMaxDist: v } })); setRefreshKey(k => k + 1); }} style={{ flex: 1 }} />
+				<div style={{ width: 48, textAlign: "right", fontSize: 11 }}>{currentYellowMax.toFixed(1)}</div>
+			</div>
+
+			<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+				<label style={{ width: 140, fontSize: 12 }}>Yellow blur (cells)</label>
+				<input type="range" min={0} max={20} step={1} value={currentBlur}
+					onChange={(e) => { const v = Number(e.target.value || 0); setParams((p:any) => ({ ...p, colorOverlay: { ...p.colorOverlay, overlaySmoothSize: v } })); setRefreshKey(k => k + 1); }} style={{ flex: 1 }} />
+				<div style={{ width: 36, textAlign: "right", fontSize: 11 }}>{currentBlur}</div>
+			</div>
+
+			<div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+				<div style={{ flex: 1 }}>
+					<label style={{ fontSize: 11 }}>Yellow weight</label>
+					<input type="range" min={0} max={2.0} step={0.05} value={yellowWeight}
+						onChange={(e) => { const v = Number(e.target.value || 0); setParams((p:any) => ({ ...p, yellowWeight: v })); setRefreshKey(k => k + 1); }} style={{ width: "100%" }} />
+					<div style={{ textAlign: "right", fontSize: 11 }}>{yellowWeight.toFixed(2)}</div>
+				</div>
+				<div style={{ width: 8 }} />
+				<div style={{ flex: 1 }}>
+					<label style={{ fontSize: 11 }}>Red weight</label>
+					<input type="range" min={0} max={2.0} step={0.05} value={redWeight}
+						onChange={(e) => { const v = Number(e.target.value || 0); setParams((p:any) => ({ ...p, redWeight: v })); setRefreshKey(k => k + 1); }} style={{ width: "100%" }} />
+					<div style={{ textAlign: "right", fontSize: 11 }}>{redWeight.toFixed(2)}</div>
+				</div>
+			</div>
+
+			{/* --- Color stops (thresholds) --- */}
+			<div style={{ height: 8 }} />
+			<div style={{ fontSize: 13, marginBottom: 6, fontWeight: 700 }}>Umbrales de color (dB)</div>
+
+			<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+				<label style={{ width: 140, fontSize: 12 }}>Red threshold</label>
+				<input type="range" min={40} max={100} step={1} value={currentRedThresh}
+					onChange={(e) => { const v = Number(e.target.value || 0); setParams((p:any) => ({ ...p, colorOverlay: { ...p.colorOverlay, redThreshold: v } })); setRefreshKey(k => k + 1); }} style={{ flex: 1 }} />
+				<div style={{ width: 44, textAlign: "right", fontSize: 11 }}>{currentRedThresh}</div>
+			</div>
+
+			<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+				<label style={{ width: 140, fontSize: 12 }}>Yellow threshold</label>
+				<input type="range" min={20} max={90} step={1} value={currentYellowThresh}
+					onChange={(e) => { const v = Number(e.target.value || 0); setParams((p:any) => ({ ...p, colorOverlay: { ...p.colorOverlay, yellowThreshold: v } })); setRefreshKey(k => k + 1); }} style={{ flex: 1 }} />
+				<div style={{ width: 44, textAlign: "right", fontSize: 11 }}>{currentYellowThresh}</div>
+			</div>
+
+			<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+				<label style={{ width: 140, fontSize: 12 }}>Green threshold</label>
+				<input type="range" min={0} max={80} step={1} value={currentGreenThresh}
+					onChange={(e) => { const v = Number(e.target.value || 0); setParams((p:any) => ({ ...p, colorOverlay: { ...p.colorOverlay, greenThreshold: v } })); setRefreshKey(k => k + 1); }} style={{ flex: 1 }} />
+				<div style={{ width: 44, textAlign: "right", fontSize: 11 }}>{currentGreenThresh}</div>
+			</div>
+
+			<div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+				<label style={{ width: 140, fontSize: 12 }}>Cyan (blue) threshold</label>
+				<input type="range" min={0} max={60} step={1} value={currentBlueThresh}
+					onChange={(e) => { const v = Number(e.target.value || 0); setParams((p:any) => ({ ...p, colorOverlay: { ...p.colorOverlay, blueThreshold: v } })); setRefreshKey(k => k + 1); }} style={{ flex: 1 }} />
+				<div style={{ width: 44, textAlign: "right", fontSize: 11 }}>{currentBlueThresh}</div>
+			</div>
+
+			{/* spacer then existing action buttons */}
+
 
 			<div style={{ display: "flex", gap: 8, marginTop: 6 }}>
 				<button onClick={() => setRefreshKey(k => k + 1)} style={{ padding: "6px 10px", borderRadius: 6, background: "#007acc", color: "#fff", border: "none", cursor: "pointer" }}>Recalcular</button>

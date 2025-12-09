@@ -32,7 +32,7 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
   const redT = thresholds.redThreshold ?? 70;
   const yellowT = thresholds.yellowThreshold ?? 50;
   const greenT = thresholds.greenThreshold ?? 40;
-  // blueThreshold now positions cyan between deep and green (can be set via UI)
+  // blueThreshold positions cyan between deep and green
   const cyanT = Number.isFinite((thresholds as any).blueThreshold) ? (thresholds as any).blueThreshold : Math.max(0, greenT - 15);
 
   const C = {
@@ -50,8 +50,8 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
   const pYellow = mapPos(yellowT);
   const pRed = mapPos(redT);
 
-  // build anchor list and ensure monotonic increasing positions
-  const anchors: { p: number; color: string }[] = [
+  // build anchor list (keep cyan) and sort
+  let anchors: { p: number; color: string }[] = [
     { p: pDeep, color: C.deepBlue },
     { p: pCyan, color: C.cyan },
     { p: pGreen, color: C.green },
@@ -59,10 +59,25 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
     { p: pRed, color: C.red }
   ].filter(a => Number.isFinite(a.p)).sort((a, b) => a.p - b.p);
 
-  // ensure anchors cover 0..1
+  // Ensure anchors cover 0..1
   if (anchors.length === 0) return getColorscale();
   if (anchors[0].p > 0.0) anchors.unshift({ p: 0.0, color: C.deepBlue });
   if (anchors[anchors.length - 1].p < 1.0) anchors.push({ p: 1.0, color: anchors[anchors.length - 1].color });
+
+  // --- IMPORTANT: avoid anchors being too close (prevents hard color bands) ---
+  const minGap = 1e-2; // minimum normalized gap between anchors (adjustable)
+  // forward pass: enforce minGap
+  for (let i = 1; i < anchors.length; i++) {
+    const prev = anchors[i - 1].p;
+    if (anchors[i].p < prev + minGap) anchors[i].p = prev + minGap;
+  }
+  // backward pass: enforce minGap from the end
+  for (let i = anchors.length - 2; i >= 0; i--) {
+    const next = anchors[i + 1].p;
+    if (anchors[i].p > next - minGap) anchors[i].p = next - minGap;
+  }
+  // clamp to [0,1]
+  anchors = anchors.map(a => ({ p: clamp01(a.p), color: a.color }));
 
   // helpers color conversion
   const hexToRgb = (hex: string) => {
@@ -80,7 +95,7 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
   };
 
   // sample a dense colorscale to avoid banding
-  const N = 128; // number of sampled stops (adjustable)
+  const N = 128;
   const sampled: [number, string][] = [];
   for (let i = 0; i < N; i++) {
     const pos = i / (N - 1);
@@ -468,14 +483,20 @@ export function generateRedHeatmapFromFacade(
 	}
 ) {
 	const w = gridX.length, h = gridY.length;
+	// redMaxDist: short-range tight red band; keep small by default
 	const redMaxDist = options?.redMaxDist ?? 2.0;
-	const yellowMaxDist = options?.yellowMaxDist ?? Math.max(4, redMaxDist * 3);
+	// Increase yellowMaxDist to produce a broader yellow halo by default.
+	// If user supplied options.yellowMaxDist, use it; otherwise use a larger fallback.
+	const yellowMaxDist = options?.yellowMaxDist ?? Math.max(6, redMaxDist * 6);
 	const sampleSpacing = options?.sampleSpacing ?? 0.25;
 	const outwardOffset = options?.outwardOffset ?? 0.02;
 	const dbPerMeter = options?.dbPerMeter ?? 0.5;
+	// Make yellow contribution stronger and smoother by default:
 	const redWeight = options?.redWeight ?? 1.0;
-	const yellowWeight = options?.yellowWeight ?? 0.6;
-	const applyYellowBlur = options?.applyYellowBlur ?? 2;
+	const yellowWeight = options?.yellowWeight ?? 0.9;
+	// applyYellowBlur controls spatial smoothing (in grid cells) of the yellow map.
+	// Increase default to create a visibly larger, softer halo.
+	const applyYellowBlur = options?.applyYellowBlur ?? 6;
 
 	// prepare segments/sources (unchanged)
 	const segmentsWithNames = segments.map((seg, i) => ({
