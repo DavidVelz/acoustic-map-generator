@@ -22,71 +22,86 @@ export function getBuildingConfig(type: BuildingType = "L") {
 export const buildingConfig = getBuildingConfig("L");
 
 export const defaultParams = {
-	spread: 50, // Reducido para un gradiente más controlado
-	maxRedDist: 2.0,
-	powerFactor: 1.2,
-	weakSpotSpread: 0.3,
+	// spread: control visual global (no es físico) para escalado de efectos
+	spread: 50, // magnitud usada en visualización (sin unidad)
+	maxRedDist: 2.0, // m, distancia máxima esperada para la banda roja por defecto
+	powerFactor: 1.2, // factor multiplicador de potencia (unitless)
+	weakSpotSpread: 0.3, // parámetros de ejemplo para "weak spots" (visual tuning)
 	weakSpotRadius: 6.0,
 	weakSpotBoost: 20,
 	weakSpotDirX: 1,
 	weakSpotDirZ: 0,
-	// --- new control variables ---
-	// Suavizado intenso para un efecto de halo difuso
-	preSmoothSize: 0,
-	preSmoothSigma: 4.0,
-	finalSmoothSize: 0,
-	finalSmoothSigma: 3.0,
-	// --- sampling controls (new) ---
-	// grid cell size in meters (1.0 m para un grid más grueso)
-	cellSize: 1.0,
-	// spacing along facades for source sampling (m)
-	sourceSpacing: 1,
-	// Color/umbral centralizado para overlay (en dB / metros)
+
+	// Prefiltros / suavizados globales (espacial, en celdas)
+	preSmoothSize: 0,      // radio (celdas) de suavizado previo
+	preSmoothSigma: 4.0,   // sigma del kernel gaussiano previo
+	finalSmoothSize: 0,    // radio (celdas) de suavizado final
+	finalSmoothSigma: 3.0, // sigma del kernel gaussiano final
+
+	// Sampling controls
+	cellSize: 1.0,        // tamaño de celda (m) si se usa para construir grilla
+	sourceSpacing: 1,     // separación por defecto entre emisores sobre la fachada (m)
+
+	// colorOverlay: parámetros que controlan mapeo y suavizado del overlay de colores
 	colorOverlay: {
-		// Umbrales solicitados:
-		// rojo > 70, amarillo > 50, verde > 40, azul claro 20..40, azul oscuro <20
-		redThreshold: 65,
-		yellowThreshold: 50,
-		// ancho (dB) de la banda amarilla (se usa para posicionar stops de color)
+		// Umbrales (dB) operativos para posicionar colores en la escala
+		redThreshold: 65,   // dB por encima de este valor aparece rojo
+		yellowThreshold: 50, // dB donde aparece banda amarilla
+		// yellowSpread: anchura (dB) alrededor de yellowThreshold que define transición amarillo->rojo/verde
 		yellowSpread: 10.0,
-		// Suavizado del overlay (aumentado para halos más suaves)
+
+		// overlaySmoothSize / overlaySmoothSigma: ajuste del suavizado espacial del overlay (celdas / sigma)
 		overlaySmoothSize: 0,
 		overlaySmoothSigma: 3.2,
-		// ajustar verde y cyan (blueThreshold) para que cyan aparezca entre deep/green/yellow
-		greenThreshold: 40,
-		// azul/cyan threshold: posición en dB donde aparece el cyan (por defecto entre green y yellow)
-		blueThreshold: 30,
-		redRadius: 7.0,
-		redDecay: 6.0,
-		// cuánto del largo del segmento se usa como sigma lateral (fracción del segLen)
+
+		// Umbrales adicionales
+		greenThreshold: 40, // dB, umbral aproximado para verde
+		blueThreshold: 30,  // dB, umbral para cyan/azul claro
+
+		// redRadius/redDecay: parámetros tácticos para la banda roja (visual/físico)
+		redRadius: 7.0,  // m, referencia para visualización roja
+		redDecay: 6.0,   // factor de caída (adimensional)
+
+		// lateralSpreadFactor: escala contra segLen para sigma lateral (fracción del largo de segmento)
 		lateralSpreadFactor: 100.15,
-		// factores que amplían la sigma lateral/longitudinal por banda de color (más anchos para verdes/azules)
+
+		// colorSpread: factores multiplicadores que amplían sigma lateral/longitudinal por banda
+		//  keys: red|yellow|green|blue — multiplicadores unitless aplicados a sigmas base
 		colorSpread: { red: 1.0, yellow: 20.8, green: 4.0, blue: 6.0 },
-		// parámetros de propagación por banda: factor multiplicador del decay y distancia máxima
+
+		// propagation: parámetros orientados a la forma y alcance por banda
 		propagation: {
+			// bandDecay: multiplicador aplicado a la pendiente de caída por banda (mayor => más rápido)
 			bandDecay: { red: 1.0, yellow: 36, green: 0.35 },
+			// bandMaxDist: alcance máximo (m) por banda
 			bandMaxDist: { red: 2.0, yellow: 30, green: 12.0 },
-			// multiplicador lateral adicional por banda (fine tune)
+			// lateralMultiplier: escala lateral adicional por banda
 			lateralMultiplier: { red: 1.0, yellow: 33.25, green: 1.6, blue: 2.2 }
 		},
-		// normalización: 'per_meter' asegura igualdad entre fachadas de distinta longitud
+
+		// Normalización de potencia: 'per_meter' reparte Lw por metro (útil para fachadas largas)
 		normalize: "per_meter" as "per_meter" | "per_sample" | "none",
-		// spacing (m) usado por la banda roja para muestreo fino (reduce huecos)
+
+		// redSampleSpacing: spacing fino (m) para muestreo de la banda roja (reduce huecos visuales)
 		redSampleSpacing: 0.12,
-		// tolerancia para front-side check (permite dot ligeramente negativo)
+
+		// dotThreshold: tolerancia para test frontal (dot>threshold considera receptor frente a la fachada)
 		dotThreshold: -0.18,
-		// control de caída (métrica) para limitar/atenuar rojo fuera de la zona cercana
+
+		// redFalloffScale: control de caída métrica adicional para limitar rojo fuera de zona cercana
 		redFalloffScale: 1.2,
-		// UI-linked caps (used by the menu sliders "Red max dist" / "Yellow max dist")
+
+		// UI caps: valores por defecto utilizados por sliders de la UI
 		redMaxDist: 2.0,
 		yellowMaxDist: 156.0
 	},
-	// Atenuación: omnidireccional para crear el halo
+
+	// attenuation: parámetros de atenuación física y estabilidad numérica
 	attenuation: {
-		exponent: 2,
-		minDist: 0.1,
-		epsilon: 1e-6,
-		dirPower: 0.0, // Omnidireccional para un efecto de halo
-		applyDirectional: true // Se mantiene true, pero dirPower=0 lo anula
+		exponent: 2,    // exponente de caída (2 => inversa cuadrada / campo libre)
+		minDist: 0.1,   // m, distancia mínima para evitar singularidades log10(0)
+		epsilon: 1e-6,  // número pequeño para evitar divisiones por cero
+		dirPower: 0.0,  // factor de directividad (0 => omnidireccional)
+		applyDirectional: true // si se aplica término direccional (usa dirPower)
 	}
 } as const;

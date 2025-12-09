@@ -7,29 +7,9 @@ import * as THREE from "three";
  * @returns Una THREE.ExtrudeGeometry.
  */
 export function createSquareExtrudeGeometry(footprint: number, buildingHeight: number): THREE.ExtrudeGeometry {
-	// Ahora genera un hexágono regular cuyo "diámetro" corresponde a `footprint`.
-	const radius = Math.max(0.001, footprint) / 2;
-	const sides = 6;
-	const points: [number, number][] = [];
-	for (let k = 0; k < sides; k++) {
-		const ang = (k / sides) * Math.PI * 2;
-		points.push([Math.cos(ang) * radius, Math.sin(ang) * radius]);
-	}
-
-	const shape = new THREE.Shape();
-	shape.moveTo(points[0][0], points[0][1]);
-	for (let i = 1; i < points.length; i++) shape.lineTo(points[i][0], points[i][1]);
-	shape.closePath();
-
-	const extrudeSettings: THREE.ExtrudeGeometryOptions = {
-		steps: 1,
-		depth: buildingHeight,
-		bevelEnabled: false
-	};
-
-	const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-	geometry.userData = { perimeter: points, depth: buildingHeight, shape: "hexagon" };
-	return geometry;
+	// Reuse the L-shape generator so callers of createSquareExtrudeGeometry get an "L".
+	// This keeps perimeter/userData consistent for PerimeterExtractor.
+	return createLShapeExtrudeGeometry(footprint, buildingHeight);
 }
 
 /**
@@ -39,42 +19,36 @@ export function createSquareExtrudeGeometry(footprint: number, buildingHeight: n
  * @returns Una THREE.ExtrudeGeometry.
  */
 export function createLShapeExtrudeGeometry(footprint: number, buildingHeight: number): THREE.ExtrudeGeometry {
+	// footprint: tamaño del bounding box total de la L
 	const side = Math.max(0.001, footprint);
 	const half = side / 2;
 
 	// legWidth controla el grosor de las "patas" de la L (fracción del footprint)
-	const legWidth = Math.max(0.05, side * 0.55);
+	// ajustable para obtener diferentes proporciones de la L
+	const legFraction = 0.45; // 45% por defecto
+	const legWidth = Math.max(0.05, side * legFraction);
 
-	// Outer rectangle (full bounding box)
-	const outer: [number, number][] = [
-		[-half, -half],
-		[half, -half],
-		[half, half],
-		[-half, half],
-	];
-
-	// Hole rectangle: elimina la esquina superior-derecha para formar la L
-	// La esquina interna comienza a `-half + legWidth` tanto en X como en Y
-	const holeX = -half + legWidth;
-	const holeY = -half + legWidth;
-	const hole: [number, number][] = [
-		[holeX, holeY],
-		[half, holeY],
-		[half, half],
-		[holeX, half],
+	// Construir una única polilínea concava que describe la L sólida (no usar hole)
+	// Orden CCW alrededor del contorno de la L:
+	//  P0: bottom-left
+	//  P1: bottom-right
+	//  P2: right, un poco arriba (define grosor horizontal)
+	//  P3: inner corner (donde se une la pata vertical)
+	//  P4: up to top along inner x
+	//  P5: top-left
+	const pts: [number, number][] = [
+		[-half, -half],                       // P0
+		[ half, -half],                       // P1
+		[ half, -half + legWidth],            // P2
+		[-half + legWidth, -half + legWidth], // P3 (inner corner)
+		[-half + legWidth,  half],            // P4
+		[-half,  half]                        // P5
 	];
 
 	const shape = new THREE.Shape();
-	shape.moveTo(outer[0][0], outer[0][1]);
-	for (let i = 1; i < outer.length; i++) shape.lineTo(outer[i][0], outer[i][1]);
+	shape.moveTo(pts[0][0], pts[0][1]);
+	for (let i = 1; i < pts.length; i++) shape.lineTo(pts[i][0], pts[i][1]);
 	shape.closePath();
-
-	// add hole as a Path so the result is an L (outer minus hole)
-	const holePath = new THREE.Path();
-	holePath.moveTo(hole[0][0], hole[0][1]);
-	for (let i = 1; i < hole.length; i++) holePath.lineTo(hole[i][0], hole[i][1]);
-	holePath.closePath();
-	shape.holes.push(holePath);
 
 	const extrudeSettings: THREE.ExtrudeGeometryOptions = {
 		depth: buildingHeight,
@@ -83,13 +57,11 @@ export function createLShapeExtrudeGeometry(footprint: number, buildingHeight: n
 	};
 
 	const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-	// Provide the exterior perimeter in userData.perimeter so PerimeterExtractor
-	// and other consumers obtain a consistent loop. Keep hole info as well.
+
+	// Proveer perimeter esperado por PerimeterExtractor (la ruta exterior concava)
 	geom.userData = {
 		type: "L",
-		perimeter: outer, // exterior loop expected by PerimeterExtractor
-		hole: hole,
-		outer,
+		perimeter: pts,
 		depth: buildingHeight
 	};
 	return geom;
@@ -212,8 +184,8 @@ export function createCrossExtrudeGeometry(footprint: number, buildingHeight: nu
  */
 export function createPolygonExtrudeGeometry(vertices: [number, number][], buildingHeight: number) {
 	if (!Array.isArray(vertices) || vertices.length < 3) {
-		// fallback a un cuadrado pequeño
-		return createTShapeExtrudeGeometry(1.0, buildingHeight);
+		// fallback: devolver una L para consistencia (usar createLShapeExtrudeGeometry)
+		return createLShapeExtrudeGeometry(1.0, buildingHeight);
 	}
 
 	const shape = new THREE.Shape();

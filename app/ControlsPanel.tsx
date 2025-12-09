@@ -1,5 +1,6 @@
-import React, { useEffect } from "react";
+import React from "react";
 import { getBuildingConfig, defaultParams } from "./config";
+import useSyncSegments from "./hooks/useSyncSegments";
 
 type Props = {
   building: any;
@@ -7,44 +8,34 @@ type Props = {
   params: any;
   setParams: (p: any) => void;
   setRefreshKey: (fn: (k: number) => number) => void;
-  setConfig: (c: any) => void; // nuevo: permite actualizar la configuración global (tipo de edificio)
+  setConfig?: (c: any) => void;
 };
 
 export default function ControlsPanel({ building, setBuilding, params, setParams, setRefreshKey, setConfig }: Props) {
+	// usar hook para sincronizar segmentos e intercambio de figuras
+	const { changeBuildingType } = useSyncSegments(building, setBuilding, setConfig, setRefreshKey);
 
-	// Inicializa LwBySegment como cuadrado: segment-0 = 100, resto = 0
-	useEffect(() => {
-		if (!building) return;
-		const segCount = 4; // cuadrado: 4 segmentos
-		const existing = (building as any).LwBySegment;
-		let needInit = false;
-		if (!Array.isArray(existing) || existing.length !== segCount) {
-			needInit = true;
-		} else {
-			for (let i = 0; i < existing.length; i++) {
-				if (typeof existing[i]?.value !== "number") { needInit = true; break; }
-			}
-		}
-		if (needInit) {
-			const arr = Array.from({ length: segCount }, (_, i) => ({ value: i === 0 ? 100 : 0 }));
-			setBuilding((b: any) => ({ ...b, LwBySegment: arr }));
-		}
-	}, [building, setBuilding]);
-	
-	// Nuevo control: elegir tipo de edificio (L / U / S)
-	const changeBuildingType = (type: "L" | "U" | "S") => {
-		// getBuildingConfig es importado al tope del archivo
-		const cfg = getBuildingConfig(type);
-		// marca el tipo seleccionado para que page.tsx cree la geometría adecuada
-		(cfg as any).shapeType = type;
-		setConfig(cfg);
-		setBuilding(cfg);
-		setRefreshKey(k => k + 1);
-	};
+	// número actual de fachadas (segments)
+	const segCount = Array.isArray((building as any)?.LwBySegment) ? (building as any).LwBySegment.length : 0;
+	const currentShape = (building && (building as any).shapeType) ?? "L";
 
     return (
     <div style={{ position: "absolute", left: 12, top: 12, background: "rgba(0,0,0,0.75)", padding: 12, borderRadius: 8, color: "#fff", fontFamily: "sans-serif", zIndex: 1100, width: 360 }}>
-      <div style={{ fontSize: 13, marginBottom: 8, fontWeight: 700 }}>Ajustes (Lw por Segmento)</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Ajustes (Lw por Segmento)</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <select value={currentShape} onChange={(e) => changeBuildingType(e.target.value)} style={{ padding: "4px 6px", borderRadius: 4 }}>
+            <option value="L">L</option>
+            <option value="U">U</option>
+            <option value="S">S</option>
+            <option value="HEX">HEX</option>
+            <option value="T">T</option>
+            <option value="CROSS">CROSS</option>
+            <option value="POLY">POLY</option>
+          </select>
+          <div style={{ fontSize: 12, color: "#ddd" }}>{segCount} fachadas</div>
+        </div>
+      </div>
 
       {(building as any).LwBySegment && Array.isArray((building as any).LwBySegment) && (building as any).LwBySegment.map((lw: any, idx: number) => (
         <div key={idx} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>

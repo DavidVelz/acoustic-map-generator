@@ -1,3 +1,22 @@
+/**
+ * Opciones para el generador de gradientes por fachada.
+ *
+ * Propiedades (unidades / significado):
+ *  - redRadius?: number
+ *      Radio operativo para la "banda roja" (m). Controla distancia lateral típica.
+ *  - redDecay?: number
+ *      Parámetro de caída (dB) de la banda roja (adimensional, mayor => caída más rápida).
+ *  - maxDist?: number
+ *      Distancia máxima (m) que se considera para contribuciones frontales (por defecto ~2 m).
+ *  - dbPerMeter?: number
+ *      Atenuación extra por metro (dB/m) para simular pérdidas atmosféricas/escenario.
+ *  - sampleSpacing?: number
+ *      Espaciado (m) entre emisores discretos a lo largo de la fachada.
+ *  - sigmaAlongFactor?: number
+ *      Factor multiplicador para sigma a lo largo del segmento (sigma_along = segLen * factor).
+ *  - facadeLossMap?: Record<string, number>
+ *      Mapa opcional { segmentName: Re_dB } con pérdidas de fachada por segmento (dB).
+ */
 export type ColorGradientOptions = {
 	redRadius?: number;
 	redDecay?: number;
@@ -46,10 +65,24 @@ export default class ColorGradientManager {
 	}
 
 	/**
-	 * computeGradientValue — modelo físico simplificado por fachada.
-	 * - Muestrea fachadas en emisores.
-	 * - Calcula Lp por muestra y aplica ponderación elíptica (perp + along).
-	 * - Suma energía lineal y convierte a dB.
+	 * computeGradientValue
+	 *
+	 * Calcula el nivel Lp (dB) en la posición (px,pz) producido por las fachadas.
+	 *
+	 * Parámetros:
+	 *  - px, pz: coordenadas del receptor en planta (m).
+	 *  - segments: array de segmentos [{ name, p1:[x,z], p2:[x,z] }, ...].
+	 *  - LwMap: mapa { segmentName: Lw_dB } con nivel interior por segmento (dB).
+	 *  - isInsidePerimeter: boolean que indica si el punto está dentro del perímetro (si true devuelve -Infinity).
+	 *
+	 * Comportamiento / variables intermedias clave:
+	 *  - FOUR_PI_CONST: constante 10*log10(4π) usada en pérdida geométrica.
+	 *  - sampleSpacing: separa la fachada en emisores puntuales; influencia resolución y coste.
+	 *  - sigma_perp / sigma_along: controlan la forma elíptica del kernel (ancho lateral y extensión longitudinal).
+	 *  - P_per_sample: energía lineal por muestra (normalización 'per_meter' o por muestra asumida fuera).
+	 *
+	 * Retorna:
+	 *  - Lp_total_db: nivel en dB si hay contribución; -Infinity si no hay contribuciones.
 	 */
 	computeGradientValue(
 		px: number,

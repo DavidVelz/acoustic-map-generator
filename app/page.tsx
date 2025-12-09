@@ -4,12 +4,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
-import { buildThresholdColorscale } from "./acoustics/ColorMap";
 import { createLShapeExtrudeGeometry, createUShapeExtrudeGeometry, createSquareExtrudeGeometry } from "./geometry/building";
 import ControlsPanel from "./ControlsPanel";
-import { generateRedHeatmapFromFacade } from "./acoustics/ColorMap";
 import PerimeterExtractor from "./Perimeter";
 import { defaultParams, getBuildingConfig } from "./config";
+import useHeatmap from "./hooks/useHeatmap";
+import usePlotlyTexture from "./hooks/usePlotlyTexture";
 
 export default function Home() {
 	const [config, setConfig] = useState(getBuildingConfig("L"));
@@ -62,158 +62,13 @@ export default function Home() {
 		[finalLoop]
 	);
 
-	const heatmap = useMemo(() => {
-		// Antes: return buildHeatmap(finalLoop, config, building, params, refreshKey);
-		// Ahora: generar grilla y llamar a generateRedHeatmapFromFacade directamente
-		if (!finalLoop || finalLoop.length < 3) return { x: [], y: [], z: [[]], min: NaN, max: NaN };
+	// ahora delegamos en el hook
+	const heatmap = useHeatmap(config, building, params, finalLoop, lShapeMesh, refreshKey);
 
-		// construir segments a partir de la geometría (nombres segment-0..)
-		const segments = PerimeterExtractor.extractFacadesSegments(lShapeMesh);
-
-		// construir lwMap desde building.LwBySegment si existe
-		const lwMap: Record<string, number> = {};
-		if (Array.isArray((building as any).LwBySegment)) {
-			const arr = (building as any).LwBySegment;
-			for (let i = 0; i < arr.length; i++) {
-				lwMap[`segment-${i}`] = Number(arr[i]?.value ?? 0);
-			}
-		}
-
-		// grid según config
-		const res = Number(config.resolution ?? 60);
-		const area = Number(config.areaSize ?? 120);
-		const dx = area / Math.max(1, res);
-		const half = area / 2;
-		const gridX = Array.from({ length: res }, (_, idx) => -half + dx * (idx + 0.5));
-		const gridY = Array.from({ length: res }, (_, idx) => -half + dx * (idx + 0.5));
-
-		// opciones tomadas desde params (fallbacks seguros)
-		const overlayCfg = (params as any)?.colorOverlay ?? {};
-		const opts = {
-			sampleSpacing: params.sourceSpacing ?? (params as any)?.cellSize ?? 1,
-			outwardOffset: 0.02,
-			redMaxDist: overlayCfg?.redMaxDist ?? 2.0,
-			yellowMaxDist: overlayCfg?.yellowMaxDist ?? (overlayCfg?.redMaxDist ?? 2.0) * 3,
-			dbPerMeter:  0.5,
-			redWeight: 1.0,
-			yellowWeight: 0.1,
-			applyYellowBlur: overlayCfg?.overlaySmoothSize ?? 2
-		};
-
-		const zmat = generateRedHeatmapFromFacade(gridX, gridY, segments, finalLoop, lwMap, opts);
-
-		// compute min/max ignoring -Infinity
-		let zmin = Infinity, zmax = -Infinity;
-		for (let j = 0; j < zmat.length; j++) {
-			for (let i = 0; i < zmat[j].length; i++) {
-				const v = zmat[j][i];
-				if (!Number.isFinite(v)) continue;
-				if (v < zmin) zmin = v;
-				if (v > zmax) zmax = v;
-			}
-		}
-		if (zmin === Infinity) { zmin = NaN; zmax = NaN; }
-
-		return { x: gridX, y: gridY, z: zmat, min: zmin, max: zmax };
-	}, [config, finalLoop, building, params, refreshKey, lShapeMesh]);
-
-	useEffect(() => {
-		let mounted = true;
-		let plotly: any = null;
-		let container = hiddenDivRef.current;
-		
-		if (!container) {
-			container = document.createElement("div");
-			document.body.appendChild(container);
-			hiddenDivRef.current = container;
-			container.style.position = "absolute";
-			container.style.left = "-20000px";
-			container.style.top = "-20000px";
-			// Use a square hidden container that matches the PNG size requested below (1600x1600).
-			// This keeps Plotly rendering 1:1 and avoids stretching / misalignment of the texture.
-			const PLOT_IMG_SIZE = 1600;
-			container.style.width = `${PLOT_IMG_SIZE}px`;
-			container.style.height = `${PLOT_IMG_SIZE}px`;
-		}
-
-		(async () => {
-			try {
-				const mod = await import("plotly.js-dist-min");
-				plotly = (mod && (mod as any).default) ? (mod as any).default : mod;
-
-				const overlayCfg = (params && (params as any).colorOverlay) || undefined;
-				// Build robust z-range (avoid zmin===zmax or NaN which collapses colors)
-				const colorscale = buildThresholdColorscale(heatmap.min, heatmap.max, overlayCfg);
-				let Z_MIN = Number.isFinite(heatmap.min) ? Math.floor(heatmap.min) : NaN;
-				let Z_MAX = Number.isFinite(heatmap.max) ? Math.ceil(heatmap.max) : NaN;
-				if (!Number.isFinite(Z_MIN) || !Number.isFinite(Z_MAX) || Z_MIN >= Z_MAX) {
-					// fallback to Lw sliders range (if available) with margin
-					const segs = (building as any).LwBySegment || [];
-					const lwVals = Array.isArray(segs) ? segs.map((s: any) => Number(s?.value ?? NaN)).filter(Number.isFinite) : [];
-					const lwMin = lwVals.length ? Math.min(...lwVals) : 0;
-					const lwMax = lwVals.length ? Math.max(...lwVals) : 80;
-					const pad = Math.max(4, Math.ceil((lwMax - lwMin) * 0.25));
-					Z_MIN = Math.floor(Math.min(lwMin, (heatmap.min || lwMin)) - pad);
-					Z_MAX = Math.ceil(Math.max(lwMax, (heatmap.max || lwMax)) + pad);
-				}
-				// safety final
-				if (Z_MIN >= Z_MAX) { Z_MIN = (heatmap.min || 0) - 10; Z_MAX = (heatmap.max || 0) + 10; }
-
-				const trace = {
-					x: heatmap.x,
-					y: heatmap.y,
-					z: heatmap.z,
-					type: "heatmap" as const,
-					colorscale,
-					zmin: Z_MIN,
-					zmax: Z_MAX,
-					// use 'best' interpolation so Plotly doesn't quantize the colors harshly
-					zsmooth: "best",
-					showscale: false,
-					hoverinfo: "skip"
-				};
-
-				// <- IMPORTANT: transparent background so masked cells are not white
-				const layout = {
-					margin: { l: 20, r: 20, t: 20, b: 20 },
-					xaxis: { visible: false },
-					yaxis: { visible: false },
-					paper_bgcolor: "rgba(0,0,0,0)",
-					plot_bgcolor: "rgba(0,0,0,0)"
-				};
-
-				await plotly.newPlot(container, [trace], layout, { staticPlot: false, displayModeBar: false });
-				// ask plotly to render PNG with transparent background
-				const dataUrl = await plotly.toImage(container, { format: "png", width: 1600, height: 1600, scale: 1 });
-				
-				if (!mounted) return;
-				
-				const loader = new THREE.TextureLoader();
-				loader.load(dataUrl, (tex) => {
-					tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-					tex.minFilter = THREE.LinearFilter;
-					tex.magFilter = THREE.LinearFilter;
-					tex.flipY = false;
-					tex.needsUpdate = true;
-					setTexture(tex);
-					try { if (plotly && plotly.purge) plotly.purge(container); } catch (e) {}
-				});
-			} catch (e) {
-				console.error("Plotly error", e);
-			}
-		})();
-
-		return () => {
-			mounted = false;
-			if (hiddenDivRef.current) {
-				try { hiddenDivRef.current.remove(); } catch(e){ }
-				hiddenDivRef.current = null;
-			}
-			if (texture) {
-				try { texture.dispose(); } catch(e) {}
-			}
-		};
-	}, [heatmap, params]);
+	// obtener textura usando hook (internamente crea contenedor Plotly y carga THREE.Texture)
+	const textureFromHook = usePlotlyTexture(heatmap, params, building);
+	// mantener textura en estado para compatibilidad con el JSX existente
+	useEffect(() => { setTexture(textureFromHook); }, [textureFromHook]);
 
  	// Perimeter line (drawn on top)
  	return (
