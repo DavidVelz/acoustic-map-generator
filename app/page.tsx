@@ -10,11 +10,12 @@ import PerimeterExtractor from "./Perimeter";
 import { defaultParams, getBuildingConfig } from "./config";
 import useHeatmap from "./hooks/useHeatmap";
 import usePlotlyTexture from "./hooks/usePlotlyTexture";
+import { Building, Params } from "./types";
 
 export default function Home() {
 	const [config, setConfig] = useState(getBuildingConfig("L"));
-	const [building, setBuilding] = useState(getBuildingConfig("L"));
-	const [params, setParams] = useState(defaultParams);
+	const [building, setBuilding] = useState<Building>(getBuildingConfig("L"));
+	const [params, setParams] = useState<Params>(defaultParams);
 	const [refreshKey, setRefreshKey] = useState(0);
 	const [texture, setTexture] = useState<THREE.Texture | null>(null);
 

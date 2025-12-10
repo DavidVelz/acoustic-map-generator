@@ -27,16 +27,26 @@
  *  - Usar refreshKey para invalidar la memoización cuando la UI cambia sliders.
  */
 import { useMemo } from "react";
+import * as THREE from "three";
 import PerimeterExtractor from "../Perimeter";
 import { generateRedHeatmapFromFacade } from "../acoustics/ColorMap";
+import { Segment } from "../acoustics/ColorGradientManager";
+import { Config, Building, Params, HeatmapResult, Segment as TypesSegment } from "../types";
 
-export default function useHeatmap(config: any, building: any, params: any, finalLoop: number[][], lShapeMesh: any, refreshKey: any) {
+export default function useHeatmap(
+	config: Config,
+	building: Building,
+	params: Params,
+	finalLoop: number[][],
+	lShapeMesh: unknown,
+	refreshKey: unknown
+): HeatmapResult {
 	return useMemo(() => {
 		// 1) validación rápida: si no hay perímetro suficiente, devolver estructura vacía
-		if (!finalLoop || finalLoop.length < 3) return { x: [], y: [], z: [[]], min: NaN, max: NaN };
+		if (!finalLoop || finalLoop.length < 3) return { x: [], y: [], z: [[]], min: NaN, max: NaN, hover: [[]] };
 
 		// 2) extraer segmentos de fachada (cada segmento = { p1, p2, name? })
-		const segments = PerimeterExtractor.extractFacadesSegments(lShapeMesh);
+		const segments = PerimeterExtractor.extractFacadesSegments(lShapeMesh as THREE.ExtrudeGeometry) as Segment[];
 
 		// 3) construir mapa Lw por segmento a partir de building.LwBySegment
 		const lwMap: Record<string, number> = {};
@@ -54,9 +64,9 @@ export default function useHeatmap(config: any, building: any, params: any, fina
 		const gridY = Array.from({ length: res }, (_, idx) => -half + dx * (idx + 0.5));
 
 		// 5) opciones para generateRedHeatmapFromFacade tomadas desde params (con fallback)
-		const overlayCfg = (params as any)?.colorOverlay ?? {};
+		const overlayCfg = params?.colorOverlay ?? {};
 		const opts = {
-			sampleSpacing: params.sourceSpacing ?? (params as any)?.cellSize ?? 1,
+			sampleSpacing: params.sourceSpacing ?? params?.cellSize ?? 1,
 			outwardOffset: 0.02,
 			redMaxDist: overlayCfg?.redMaxDist ?? 2.0,
 			yellowMaxDist: overlayCfg?.yellowMaxDist ?? (overlayCfg?.redMaxDist ?? 2.0) * 3,
@@ -81,7 +91,49 @@ export default function useHeatmap(config: any, building: any, params: any, fina
 		}
 		if (zmin === Infinity) { zmin = NaN; zmax = NaN; }
 
-		// 8) devolver estructura lista para render (Plotly / textura)
-		return { x: gridX, y: gridY, z: zmat, min: zmin, max: zmax };
+		// --- NUEVO: construir matriz de hover (tooltip) ---
+		// helper: distancia punto->segmento
+		const pointToSegmentDist = (x: number, z: number, x1: number, z1: number, x2: number, z2: number) => {
+			const dxs = x2 - x1, dzs = z2 - z1;
+			if (dxs === 0 && dzs === 0) return Math.hypot(x - x1, z - z1);
+			const t = ((x - x1) * dxs + (z - z1) * dzs) / (dxs * dxs + dzs * dzs);
+			const tc = Math.max(0, Math.min(1, t));
+			const cx = x1 + tc * dxs, cz = z1 + tc * dzs;
+			return Math.hypot(x - cx, z - cz);
+		};
+
+		const hover: string[][] = Array.from({ length: zmat.length }, () => new Array(zmat[0]?.length ?? 0).fill(""));
+
+		for (let j = 0; j < zmat.length; j++) {
+			for (let i = 0; i < zmat[j].length; i++) {
+				const Lp = zmat[j][i];
+				const px = gridX[i], pz = gridY[j];
+
+				// calcular distancia mínima a cualquier segmento (perpendicular mínima)
+				let minD = Infinity;
+				for (const seg of segments) {
+					const d = pointToSegmentDist(px, pz, seg.p1[0], seg.p1[1], seg.p2[0], seg.p2[1]);
+					if (d < minD) minD = d;
+				}
+
+				if (!Number.isFinite(Lp) || !Number.isFinite(minD)) {
+					hover[j][i] = "Sin datos";
+					continue;
+				}
+
+				// potencia/energía estimada en unidades relativas: E ~ 10^(Lp/10)
+				const potenciaRel = Math.pow(10, Lp / 10);
+
+				// Tooltip en español (HTML): distancia a fachada (m), nivel Lp (dB) y potencia estimada (relativa)
+				// Usar <br> para saltos de línea — Plotly muestra HTML en hovertext.
+				hover[j][i] =
+					`Distancia a fachada: ${minD.toFixed(2)} m<br>` +
+					`Nivel (Lp): ${Lp.toFixed(1)} dB<br>` +
+					`Potencia estimada (rel): ${potenciaRel.toExponential(3)}`;
+			}
+		}
+
+		// 8) devolver estructura lista para render (Plotly / textura) incluyendo hover
+		return { x: gridX, y: gridY, z: zmat, min: zmin, max: zmax, hover };
 	}, [config, building, params, finalLoop, lShapeMesh, refreshKey]);
 }

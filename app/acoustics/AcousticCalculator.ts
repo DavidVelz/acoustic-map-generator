@@ -7,17 +7,18 @@ import { buildAllFacades } from "./FacadeUtils";
 import { defaultParams } from "../config";
 import { generateSegmentBandEnergy, pointInPolygon } from "./GradientFactory";
 
-// Helper function for edge tapering
+// Función auxiliar para atenuar los extremos de un segmento (taper en los bordes)
+// pos: posición a lo largo del segmento (metros), segLen: longitud total del segmento (metros)
+// taper: fracción del segmento usada para el taper en cada extremo (valor por defecto 0.25 = 25%)
 function edgeTaperWeight(pos: number, segLen: number, taper: number = 0.25): number {
-  // pos: position along segment (meters), segLen: total segment length (meters), taper: fraction of length to taper at each end
   if (segLen <= 0) return 1;
   const taperLen = Math.max(0, Math.min(segLen * taper, segLen / 2));
   if (taperLen === 0) return 1;
   if (pos < taperLen) {
-    // Start taper
+    // Entrada: rampa desde 0..1
     return pos / taperLen;
   } else if (pos > segLen - taperLen) {
-    // End taper
+    // Salida: rampa decreciente 1..0
     return (segLen - pos) / taperLen;
   }
   return 1;
@@ -27,9 +28,9 @@ type ComputeCfg = {
   areaSize: number;
   resolution: number;
   footprint: number;
-  poly?: number[][];
-  main?: { name: string; p1: number[]; p2: number[] }[];
-  Lw: Record<string, number>;
+  poly?: number[][]; // perímetro en planta (array de [x,z])
+  main?: { name: string; p1: number[]; p2: number[] }[]; // segmentos/fachadas
+  Lw: Record<string, number>; // niveles Lw por segmento
   sources?: Source[];
   params?: {
     preSmoothSize?: number;
@@ -39,29 +40,70 @@ type ComputeCfg = {
     attenuation?: AttenuationOptions;
     spread?: number;
     colorAttenuationFactor?: number;
-    cellSize?: number;       // meters per grid cell (preferred)
-    sourceSpacing?: number;  // spacing for perimeter sources (m)
-    // ISO-related optional overrides
+    cellSize?: number;       // tamaño de celda en metros (preferible)
+    sourceSpacing?: number;  // separación entre emisores en perímetro (m)
+    // Opciones relacionadas a ISO (sobrescribir si es necesario)
     Df_room?: number;
     Df_out?: number;
-    Rmap?: Record<string, number>; // R per segment if available
-    Lp_in_map?: Record<string, number>; // optional Lp_in by room to compute Lw_room
+    Rmap?: Record<string, number>; // parámetros R por segmento si están disponibles
+    Lp_in_map?: Record<string, number>; // Lp_in por sala para calcular Lw_room si se dispone
     invertNormals?: boolean;
   };
 };
 
+/**
+ * AcousticCalculator
+ *
+ * Clase utilitaria (métodos estáticos) para generar un mapa en planta de niveles sonoros (Lp, dB)
+ * a partir de:
+ *  - lista de fachadas/segmentos (`main`),
+ *  - perímetro (`poly`) que define interior/exterior,
+ *  - niveles por fachada (`Lw`) y parámetros opcionales en `params`.
+ *
+ * Resultado:
+ *  - { x: number[], y: number[], z: (number|null)[][], min: number, max: number, poly: number[][] }
+ *    x,y: ejes de la grilla (metros), z: matriz de niveles en dB (null = celda ausente para Plotly),
+ *    min/max: extremos útiles para normalizar la paleta.
+ *
+ * Notas de diseño y unidades:
+ *  - Distancias en metros; niveles en dB. Internamente se suman energías lineales (10^(dB/10)).
+ *  - `cellSize` (si se proporciona) fija el tamaño de celda; si no, se usa `resolution` para distribuir celdas.
+ *
+ * Flujo principal (compute):
+ *  1) Construcción de la grilla (xs, ys).
+ *  2) Extracción de elementos de fachada (buildAllFacades) y cálculo de pérdidas Re' (ISOModel).
+ *  3) Cálculo base Lp_out por celda con ISOModel (usando Lw_room y Re').
+ *  4) Suavizados pre/final con GaussianSmoother (si se configuran).
+ *  5) Generación de overlay por fachada (bandas: blue/green/yellow/red) mediante generateSegmentBandEnergy.
+ *  6) Combinación lineal de energía base + energía por fachadas; conversión a dB.
+ *  7) Suavizado visual final y retorno del resultado listo para render.
+ *
+ * Recomendaciones:
+ *  - Para visualización interactiva usar cellSize ~ 0.5..1.0 m y sourceSpacing 0.1..0.5 m.
+ *  - Si se necesita mayor fidelidad reducir cellSize y sourceSpacing (a costa de CPU).
+ *  - El modelo es aproximado; no sustituye cálculos normativos por bandas de octava/tercio.
+ */
 export default class AcousticCalculator {
-  // (now GaussianSmoother provides kernel & convolution helpers)
-
-  // core compute method (refactor de computeLpGrid)
+  /**
+   * compute(cfg: ComputeCfg)
+   *
+   * Parámetros resumidos en `cfg`:
+   *  - areaSize, resolution: definición del área a muestrear.
+   *  - poly?: perímetro en planta (array de [x,z]) para enmascaramiento interior.
+   *  - main?: array de segmentos con { name, p1, p2 }.
+   *  - Lw: mapa { segmentName: Lw_dB } con niveles por fachada.
+   *  - params?: opciones físicas y visuales (ver tipo ComputeCfg).
+   *
+   * Devuelve: objeto con ejes x,y, matriz z (dB o null), min/max y poly.
+   */
   static compute(cfg: ComputeCfg) {
     const area = cfg.areaSize;
     const halfArea = area / 2;
     const xs: number[] = [], ys: number[] = [];
-    // grid
+    // Construcción de la grilla: si se proporciona cellSize usamos ese paso; si no, usamos resolution.
     if (cfg.params?.cellSize && cfg.params.cellSize > 0) {
       const step = cfg.params.cellSize;
-      const n = Math.max(3, Math.floor(area / step) + 1); // number of samples along axis
+      const n = Math.max(3, Math.floor(area / step) + 1); // número de muestras por eje
       for (let i = 0; i < n; i++) {
         xs.push(-halfArea + i * step);
         ys.push(-halfArea + i * step);
@@ -76,32 +118,30 @@ export default class AcousticCalculator {
     const res = xs.length;
 
     const main = cfg.main ?? [];
-    // build facade elements map
+    // Construye el mapa de elementos de fachada (se usan para calcular Re' y áreas)
     const facadeMap = buildAllFacades(main as any, (cfg as any).buildingHeight ?? 10, cfg.params?.Rmap);
 
-    // precompute Re' per facade
+    // Precalcula Re' (pérdida de fachada) por segmento mediante ISOModel
     const RePrimeMap: Record<string, number> = {};
     for (const seg of main as any) {
       const elems = facadeMap[seg.name] || [];
       RePrimeMap[seg.name] = ISOModel.computeFacadeRePrime(elems);
     }
 
-    // compute centroid of perimeter (used previously; kept for fallback)
+    // Cálculo del centróide del perímetro (usado como heurística fallback para orientar normales)
     let centroidX = 0, centroidY = 0;
     if (cfg.poly && cfg.poly.length) {
       for (const p of cfg.poly) { centroidX += p[0]; centroidY += p[1]; }
       centroidX /= cfg.poly.length; centroidY /= cfg.poly.length;
     }
 
-    // compute Lp_out per grid cell using ISO simplified formula:
-    // use NaN as mask marker for arrays, but overlay baseline uses -Infinity for comparisons
+    // Cálculo base Lp_out por celda (simplificación ISO)
     const output: number[][] = Array.from({ length: res }, () => new Array(res).fill(NaN));
     for (let j = 0; j < res; j++) {
       for (let i = 0; i < res; i++) {
         const px = xs[i], pz = ys[j];
-        // skip if inside perimeter polygon
+        // Si el punto está dentro del perímetro, lo marcamos como NaN (no válido / interior)
         if (cfg.poly && cfg.poly.length >= 3) {
-          // simple point-in-polygon test
           let inside = false;
           for (let a = 0, b = cfg.poly.length - 1; a < cfg.poly.length; b = a++) {
             const xi = cfg.poly[a][0], zi = cfg.poly[a][1];
@@ -112,7 +152,7 @@ export default class AcousticCalculator {
           if (inside) { output[j][i] = NaN; continue; }
         }
 
-        // find nearest segment (by perpendicular distance)
+        // Buscar el segmento más cercano mediante distancia perpendicular
         let bestSeg: any = null, bestDist = Infinity;
         for (const seg of main as any) {
           const ax = seg.p1[0], az = seg.p1[1];
@@ -127,20 +167,19 @@ export default class AcousticCalculator {
         }
         if (!bestSeg) { output[j][i] = NaN; continue; }
 
-        // Lw_room: prefer cfg.Lw for the segment (user-provided level of power); fallback: try Lp_in_map -> compute Lw_room
+        // Determinar Lw_room: preferencia por cfg.Lw; si no existe usar Lp_in_map para calcular Lw; si no, fallback
         const segName = bestSeg.seg.name;
         let Lw_room = Number(cfg.Lw?.[segName] ?? NaN);
         if (!Number.isFinite(Lw_room) && cfg.params?.Lp_in_map && Number.isFinite(cfg.params.Lp_in_map[segName])) {
           Lw_room = ISOModel.computeLwRoomFromLpIn(cfg.params.Lp_in_map[segName], (facadeMap[segName]?.reduce((s, e) => s + e.area, 0) || 1));
         }
         if (!Number.isFinite(Lw_room)) {
-          // fallback nominal
-          Lw_room = 60;
+          Lw_room = 60; // valor nominal por defecto si no hay datos
         }
 
         const RePrime = RePrimeMap[segName] ?? 30;
-        const Df_room = cfg.params?.Df_room ?? 1; // Default value or fallback
-        const Df_out = cfg.params?.Df_out ?? 1;   // Default value or fallback
+        const Df_room = cfg.params?.Df_room ?? 1;
+        const Df_out = cfg.params?.Df_out ?? 1;
         const lpOut = ISOModel.computeLpOutAtPoint({
           Lw_room,
           RePrime,
@@ -153,7 +192,7 @@ export default class AcousticCalculator {
       }
     }
 
-    // smoothing pipeline (pre/final) using GaussianSmoother
+    // Suavizados pre y final sobre la grilla base usando GaussianSmoother
     const preSize = cfg.params?.preSmoothSize ?? 0;
     const preSigma = cfg.params?.preSmoothSigma ?? 1.2;
     let smoothed = GaussianSmoother.apply(output, preSize, preSigma);
@@ -162,7 +201,7 @@ export default class AcousticCalculator {
     const finalSigma = cfg.params?.finalSmoothSigma ?? 0.8;
     smoothed = GaussianSmoother.apply(smoothed, finalSize, finalSigma);
 
-    // --- Per-facade strong-signal overlay using band-specific gradient generator ---
+    // --- Overlay por fachadas: generación de energía por bandas (blue/green/yellow/red) ---
     const overlayParams = (cfg.params && (cfg.params as any).colorOverlay) || {};
     const globalHotBoost = (overlayParams as any).hotBoost ?? 1.0;
 
@@ -171,7 +210,7 @@ export default class AcousticCalculator {
 
     const redThreshold = Number(overlayParams.redThreshold ?? 70);
 
-    // Use GradientFactory per segment and per band
+    // Por cada segmento: generar energía por banda y acumular (suma lineal en energía)
     for (const seg of main ?? []) {
       const segName = seg.name;
       const lwValRaw = Number(cfg.Lw?.[segName]);
@@ -179,7 +218,7 @@ export default class AcousticCalculator {
       if (!Number.isFinite(Lw_room)) continue;
       const RePrime = RePrimeMap[segName] ?? 30;
 
-      // decide bands
+      // decidir qué bandas generar para este segmento según Lw_room
       const bands: ("red" | "yellow" | "green" | "blue")[] = ["blue", "green"];
       const yellowT = Number(overlayParams.yellowThreshold ?? 50);
       if (Lw_room >= yellowT) bands.push("yellow");
@@ -197,7 +236,6 @@ export default class AcousticCalculator {
           normalize: (overlayParams && (overlayParams as any).normalize) ?? (cfg.params && (cfg.params as any).normalize) ?? "per_meter",
           redSampleSpacing: (overlayParams && (overlayParams as any).redSampleSpacing) ?? 0.12,
           dotThreshold: (overlayParams && (overlayParams as any).dotThreshold) ?? -0.18,
-          // <-- nuevo:
           invertNormals: cfg.params?.invertNormals ?? false,
           poly: cfg.poly ?? null,
           center: { x: centroidX, y: centroidY },
@@ -211,11 +249,10 @@ export default class AcousticCalculator {
       }
     }
 
-    // convert to dB and continue as before
+    // convertir energía sumada a dB para la capa de fuentes (opcional uso futuro)
     const sourceLpGrid: number[][] = energyGrid.map(row => row.map(e => e > 0 ? 10 * Math.log10(e) : NaN));
 
-    // overlay: combine base smoothed (dB) + source-driven (we have energyGrid linear)
-    // convert base smoothed (dB) into linear energy and sum with energyGrid, then back to dB
+    // Combinar la grilla base suavizada (en dB) con la energía de fuentes (en lineal): convertir base a energía, sumar y volver a dB
     const combinedEnergy: number[][] = Array.from({ length: h }, (_, j) => new Array(w).fill(0));
     for (let j = 0; j < h; j++) {
       for (let i = 0; i < w; i++) {
@@ -225,15 +262,15 @@ export default class AcousticCalculator {
         combinedEnergy[j][i] = baseEnergy + srcEnergy;
       }
     }
-    // convert back to dB grid (NaN when zero)
+    // volver a dB, usando NaN cuando no hay energía
     let overlay: number[][] = combinedEnergy.map(row => row.map(e => e > 0 ? 10 * Math.log10(e) : NaN));
 
-    // --- END REPLACED ---
+    // --- REEMPLAZADO: ajuste por segmento, normal robusta, suavizados finales y recorte ---
 
-    // parameters to make "hot" facades stronger when Lw high
-    // const globalHotBoost = (overlayParams as any).hotBoost ?? 1.0; // Removed duplicate declaration
+    // parámetros para hacer más "fuertes" las fachadas con Lw alto
+    // const globalHotBoost = (overlayParams as any).hotBoost ?? 1.0; // Eliminada declaración duplicada
 
-    // Define default values for redRadius and redDecay
+    // Definir valores por defecto para redRadius y redDecay
     const defaultRedRadius = 2.5;
     const defaultRedDecay = 6.0;
     const lateralSpreadFactor = 0.18;
@@ -242,7 +279,7 @@ export default class AcousticCalculator {
     for (let j = 0; j < res; j++) {
       for (let i = 0; i < res; i++) {
         const px = xs[i], pz = ys[j];
-        if (cfg.poly && cfg.poly.length && pointInPolygon(px, pz, cfg.poly)) continue; // outside only
+        if (cfg.poly && cfg.poly.length && pointInPolygon(px, pz, cfg.poly)) continue; // fuera del perímetro
 
         let bestValue = overlay[j][i];
 
@@ -255,10 +292,10 @@ export default class AcousticCalculator {
             const ax = seg.p1[0], az = seg.p1[1];
             const bx = seg.p2[0], bz = seg.p2[1];
 
-            // Fix: define cellSize from params with fallback
+            // Obtener cellSize desde params con fallback
             const cellSize = cfg.params?.cellSize ?? 1;
 
-            // Helper: project point (px, pz) onto segment (ax, az)-(bx, bz)
+            // Función auxiliar: proyectar punto (px,pz) sobre el segmento (ax,az)-(bx,bz)
             function projectOnSegment(px: number, pz: number, ax: number, az: number, bx: number, bz: number) {
               const vx = bx - ax, vz = bz - az;
               const wx = px - ax, wz = pz - az;
@@ -273,25 +310,25 @@ export default class AcousticCalculator {
                 tClamped,
                 closestX,
                 closestZ,
-                tFrac: t // unclamped
+                tFrac: t // fracción no recortada
               };
             }
 
             const proj = projectOnSegment(px, pz, ax, az, bx, bz);
             const { segLen, tClamped, closestX, closestZ, tFrac } = proj;
-            // Allow larger fractional tolerance around segment ends to blend corners better
-            const tFracTol = 0.08; // ~8% tolerance along segment
+            // Permitir mayor tolerancia en extremos para suavizar esquinas
+            const tFracTol = 0.08; // ~8% de tolerancia a lo largo del segmento
             if (tFrac < -tFracTol || tFrac > 1 + tFracTol) continue;
-            // If projection is slightly outside [0..1] (near a corner), keep contribution but reduce its strength smoothly
+            // Si la proyección queda ligeramente fuera [0..1], mantener contribución pero suavizarla
             const nearEndBlend = (tFrac < 0 || tFrac > 1) ? Math.max(0.18, 1 - Math.abs(tFrac < 0 ? tFrac : tFrac - 1) / tFracTol) : 1.0;
 
-            // --- REPLACED: robust outward-normal & probe (was centroid-based) ---
-            // tangent unit
+            // --- REEMPLAZADO: normal robusta hacia el exterior mediante sondas ---
+            // tangente unitaria
             const tx = segLen > 1e-9 ? (bx - ax) / segLen : 1;
             const tz = segLen > 1e-9 ? (bz - az) / segLen : 0;
-            // nominal normal (rotate tangent)
+            // normal nominal (rotación de la tangente)
             let nx = -tz, nz = tx;
-            // robust test: probe a small step on both sides of the facade to detect interior side
+            // prueba robusta: sondar ambos lados del segmento para detectar interior/exterior
             const probeStep = Math.max(0.05, (cfg.params?.cellSize ?? 1) * 0.35);
             const testOutX = closestX + nx * probeStep;
             const testOutZ = closestZ + nz * probeStep;
@@ -302,37 +339,37 @@ export default class AcousticCalculator {
               outIsInside = pointInPolygon(testOutX, testOutZ, cfg.poly);
               inIsInside = pointInPolygon(testInX, testInZ, cfg.poly);
             }
-            // If OUT probe is inside and IN is outside, flip normal so OUT points outward
+            // Si la sonda exterior está dentro y la interior fuera, invertir la normal
             if (outIsInside && !inIsInside) { nx = -nx; nz = -nz; }
-            // If both probes are inside (ambiguous for concave/holes), fall back to centroid test
+            // Si ambas sondas quedan dentro (ambigüedad), usar centroide como heurística
             if (outIsInside && inIsInside && cfg.poly && cfg.poly.length) {
               const vxToCentroid = closestX - centroidX;
               const vzToCentroid = closestZ - centroidY;
               const dotCent = nx * vxToCentroid + nz * vzToCentroid;
               if (dotCent < 0) { nx = -nx; nz = -nz; }
             }
-            // Final probe: if the outward probe (closest + normal) STILL lies inside polygon, skip this facade contribution
+            // Sonda final: si el punto hacia el exterior sigue dentro del polígono, omitimos esta contribución
             const finalProbeX = closestX + nx * probeStep;
             const finalProbeZ = closestZ + nz * probeStep;
             if (cfg.poly && cfg.poly.length && pointInPolygon(finalProbeX, finalProbeZ, cfg.poly)) {
-              // LOGO DE VALIDACIÓN DE NORMAL
+              // Registro de validación de normales (en español)
               console.log(
-                `[NORMAL ERROR] Segmento: ${seg.name} | Punto: (${closestX.toFixed(2)}, ${closestZ.toFixed(2)}) | Normal: (${nx.toFixed(2)}, ${nz.toFixed(2)}) => MAL ORIENTADA`
+                `[NORMAL MAL] Segmento: ${seg.name} | Punto: (${closestX.toFixed(2)}, ${closestZ.toFixed(2)}) | Normal: (${nx.toFixed(2)}, ${nz.toFixed(2)}) => MAL ORIENTADA`
               );
               continue;
             } else {
-              // LOGO DE VALIDACIÓN DE NORMAL
+              // Registro de validación de normales (en español)
               console.log(
-                `[NORMAL OK] Segmento: ${seg.name} | Punto: (${closestX.toFixed(2)}, ${closestZ.toFixed(2)}) | Normal: (${nx.toFixed(2)}, ${nz.toFixed(2)}) => BIEN ORIENTADA`
+                `[NORMAL BIEN] Segmento: ${seg.name} | Punto: (${closestX.toFixed(2)}, ${closestZ.toFixed(2)}) | Normal: (${nx.toFixed(2)}, ${nz.toFixed(2)}) => BIEN ORIENTADA`
               );
             }
-            // --- END REPLACED ---
+            // --- FIN normal robusta ---
 
             const offX = px - closestX, offZ = pz - closestZ;
             const distFront = Math.hypot(offX, offZ);
             const tangentialAbs = Math.abs(offX * tx + offZ * tz);
 
-            // derive per-segment redRadius and decay; scale with segment length so narrow segments don't overreach
+            // Derivar redRadius y redDecay por segmento (escalado por longitud)
             let redRadius = Math.max(defaultRedRadius, segLen * 0.6);
             let redDecay = defaultRedDecay;
             if ((overlayParams as any).hotSegment === seg.name) {
@@ -340,44 +377,44 @@ export default class AcousticCalculator {
               redDecay = Math.max(2.0, redDecay * 0.5);
             }
 
-            // lateral tolerance: allow some tangential offset proportional to cellSize
+            // Tolerancia lateral: permitir cierto offset tangencial proporcional a cellSize
             const lateralTol = Math.max(1e-6, (cfg.params?.cellSize ?? 1) * 0.6);
             if (tangentialAbs > Math.max(lateralTol, segLen * 0.6) && distFront > redRadius) continue;
 
-            // frontal check using oriented normal
+            // Comprobación frontal usando la normal orientada
             const perp = offX * nx + offZ * nz;
             if (perp <= 0) continue;
 
 
             if (distFront > redRadius && distFront > (overlayParams?.blueRadius ?? 20)) continue;
 
-            // lateral gaussian weight (allows smooth falloff across the segment width)
+            // Peso gaussiano lateral (suavizado a lo ancho del segmento)
             const lateralSigma = Math.max(cellSize * 0.25, segLen * lateralSpreadFactor);
             let lateralWeight = Math.exp(- (tangentialAbs * tangentialAbs) / (2 * lateralSigma * lateralSigma));
             lateralWeight = Math.pow(lateralWeight, 0.95);
-            // along-segment gaussian: favor points close to the middle of the segment so halos span the face
-            const centerOffset = Math.abs(tClamped - (segLen * 0.5)); // meters from center
+            // Peso longitudinal centrado en la mitad del segmento
+            const centerOffset = Math.abs(tClamped - (segLen * 0.5)); // metros desde el centro
             const alongSigma = Math.max(segLen * 0.25, cellSize * 0.5);
             const alongWeight = Math.exp(- (centerOffset * centerOffset) / (2 * alongSigma * alongSigma));
-            // combine lateral + along weights, apply near-end blending to soften corners
+            // Combinar pesos y aplicar suavizado en extremos
             const combinedLateralWeight = Math.max(0.002, lateralWeight * Math.pow(alongWeight, 0.95) * nearEndBlend);
 
-            // compute taper and frontal weight
+            // Cálculo de taper y peso frontal
             const wEdge = edgeTaperWeight(tClamped, segLen, lateralTaper);
             const wFront = Math.max(0, 1 - distFront / Math.max(1e-6, redRadius));
 
-            // contribution: prefer linear decay from Lw (strong visual red) but mix with inverse-distance log
+            // Contribución: mezcla entre decaimiento lineal y logarítmico
             const linContrib = Math.max(0, lw - redDecay * distFront);
             const logContrib = lw - 20 * Math.log10(Math.max(distFront, 0.01));
-            // añadir refuerzo según nivel de fuente (fuentes más potentes "empujan" más color)
+            // Refuerzo según nivel de fuente (fuentes más potentes generan halos más extendidos)
             const sourceBoost = 1 + Math.max(0, (lw - 60) / 40); // ~1..2.5 para lw 60..160
             const baseComb = (0.6 * linContrib + 0.4 * logContrib) * wEdge * wFront * combinedLateralWeight;
             let contribution = baseComb * sourceBoost;
-            // asegurar que muy cerca de la fachada la contribución no quede por debajo de un valor razonable
+            // Asegurar contribución mínima muy cerca de la fachada
             if (distFront < Math.max(0.1, (cfg.params?.cellSize ?? 1) * 0.5)) {
               contribution = Math.max(contribution, Math.min(lw, lw - redDecay * 0.15));
             }
-            // clamp al nivel source
+            // Limitar por el nivel de fuente
             contribution = Math.min(lw, contribution);
 
             if (contribution > bestValue) bestValue = contribution;
@@ -388,28 +425,29 @@ export default class AcousticCalculator {
       }
     }
 
-    // Apply Gaussian smoothing to the overlay to create smooth concentric gradients
+    // Aplicar suavizado gaussiano al overlay para generar gradientes concéntricos suaves
     const overlaySmoothSize = Math.max(1, Number(overlayParams.overlaySmoothSize ?? 9));
     const overlaySmoothSigma = Math.max(0.1, Number(overlayParams.overlaySmoothSigma ?? 3.0));
     const smoothedOverlay = GaussianSmoother.apply(overlay.map(row => row.map(v => Number.isFinite(v) ? v : NaN)), overlaySmoothSize, overlaySmoothSigma);
 
-    // Prepare finalSmooth as a copy of the last smoothed grid
+    // Preparar finalSmooth como copia del último suavizado base
     let finalSmooth: number[][] = smoothed.map(row => row.slice());
 
-    // Blend: outside perimeter use smoothed overlay, inside keep original finalSmooth
-    // mask: true = outside
+    // Mezcla: fuera del perímetro usar el overlay suavizado; dentro mantener finalSmooth original
+    // mask: true = fuera (área visible)
     const mask: boolean[][] = Array.from({ length: res }, () => new Array(res).fill(false));
     for (let j = 0; j < res; j++) for (let i = 0; i < res; i++) mask[j][i] = (cfg.poly && cfg.poly.length) ? !pointInPolygon(xs[i], ys[j], cfg.poly) : true;
 
     finalSmooth = smoothedOverlay.map((row, j) => row.map((val, i) => mask[j][i] ? (Number.isFinite(val) ? val : finalSmooth[j][i]) : finalSmooth[j][i]));
 
-    // recompute final min/max
+    // Recalcular min/max finales
     const flatFinal = finalSmooth.flat().filter(v => Number.isFinite(v));
     const finalMin = flatFinal.length ? Math.min(...flatFinal) : 0;
     const finalMax = flatFinal.length ? Math.max(...flatFinal) : 0;
 
-    // CAP: ensure final map does not exceed supplied Lw values.
-    // If the user set all segment Lw/Lp below a threshold (e.g. <50), no cell should show higher.
+    // LÍMITE (CAP): asegurar que el mapa final no exceda los valores Lw suministrados.
+    // Si el usuario establece todos los Lw/Lp de los segmentos por debajo de un umbral (p. ej. <50),
+    // ninguna celda debe mostrar un valor superior.
     const suppliedLwVals = Object.values(cfg.Lw || {}).map(v => Number(v)).filter(Number.isFinite);
     if (suppliedLwVals.length) {
       const maxSuppliedLw = Math.max(...suppliedLwVals);
@@ -424,12 +462,12 @@ export default class AcousticCalculator {
       }
     }
 
-    // recompute final min/max after cap
+    // Recalcular min/max después del recorte
     const flatFinalAfterCap = finalSmooth.flat().filter(v => Number.isFinite(v));
     const finalMinAfter = flatFinalAfterCap.length ? Math.min(...flatFinalAfterCap) : finalMin;
     const finalMaxAfter = flatFinalAfterCap.length ? Math.max(...flatFinalAfterCap) : finalMax;
 
-    // Convert non-finite (NaN) to null so Plotly treats them as missing and respects transparent bg
+    // Convertir valores no finitos (NaN) a null para que Plotly los trate como transparentes
     const zForPlot = finalSmooth.map(row => row.map(v => Number.isFinite(v) ? v : null));
     return { x: xs, y: ys, z: zForPlot, min: finalMinAfter, max: finalMaxAfter, poly: cfg.poly ?? [] };
   }

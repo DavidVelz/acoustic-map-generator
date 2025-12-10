@@ -2,19 +2,42 @@ import ISOModel, { SourceSimple } from "../lib/ISOModel";
 import { getPerpAlong } from "./FacadeUtils";
 import WaveEmitter from "./WaveEmitter";
 
+/**
+ * getColorscale
+ *
+ * Devuelve una paleta base de anclas (posición normalizada [0..1], color hex) que se usa
+ * como referencia para construir rampas de color muestreadas para Plotly.
+ * La paleta incluye: azul oscuro -> cyan -> verde -> amarillo -> rojo.
+ *
+ * No realiza cálculo alguno, solo devuelve los anclajes por defecto.
+ */
 export function getColorscale() {
-  // Deep-blue -> cyan -> green -> yellow -> red
-  return [
-    [0.0, "#00224d"], // deep
-    [0.20, "#00cccc"], // cyan
-    [0.40, "#00cc66"], // green
-    [0.70, "#ffff33"], // yellow
-    [1.0,  "#ff0000"]  // red
-  ] as [number, string][];
+	// Azul oscuro -> cyan -> verde -> amarillo -> rojo
+	return [
+		[0.0, "#00224d"], // azul oscuro
+		[0.20, "#00cccc"], // cyan
+		[0.40, "#00cc66"], // verde
+		[0.70, "#ffff33"], // amarillo
+		[1.0,  "#ff0000"]  // rojo
+	] as [number, string][];
 }
 
-// New: build a smooth sampled colorscale avoiding sharp intermediate stops.
-// Anchors: deepBlue, cyan, green, yellow, red. Sample densely to avoid stripes.
+/**
+ * buildThresholdColorscale(zmin, zmax, thresholds)
+ *
+ * Construye y devuelve un colorscale muestreado y suave (lista de [pos,color]) para Plotly
+ * basado en:
+ *  - zmin / zmax: rango de datos real de la malla de niveles (dB).
+ *  - thresholds: umbrales configurables { redThreshold, yellowThreshold, greenThreshold, blueThreshold, yellowSpread }.
+ *
+ * Comportamiento resumido:
+ *  - Mapea los umbrales a posiciones normalizadas dentro de [0..1] (con pequeño margen para evitar extremos).
+ *  - Inserta anclas para deepBlue, cyan, green, yellow y red (cyan posicionado por blueThreshold).
+ *  - Aplica una corrección mínima de separación entre anclas para evitar franjas duras.
+ *  - Muestrea densamente la rampa (N pasos) interpolando colores entre anclas para generar una gradiente continua.
+ *
+ * Retorna: array [ [pos,color], ... ] apto para Plotly (pos en [0..1], color en "#rrggbb").
+ */
 export function buildThresholdColorscale(zmin: number, zmax: number, thresholds: { redThreshold?: number; yellowThreshold?: number; greenThreshold?: number; blueThreshold?: number; yellowSpread?: number } | undefined) {
   if (zmax <= zmin || !thresholds) return getColorscale();
 
@@ -59,19 +82,19 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
     { p: pRed, color: C.red }
   ].filter(a => Number.isFinite(a.p)).sort((a, b) => a.p - b.p);
 
-  // Ensure anchors cover 0..1
+  // Asegurar que los anclajes cubran 0..1
   if (anchors.length === 0) return getColorscale();
   if (anchors[0].p > 0.0) anchors.unshift({ p: 0.0, color: C.deepBlue });
   if (anchors[anchors.length - 1].p < 1.0) anchors.push({ p: 1.0, color: anchors[anchors.length - 1].color });
 
-  // --- IMPORTANT: avoid anchors being too close (prevents hard color bands) ---
-  const minGap = 1e-2; // minimum normalized gap between anchors (adjustable)
-  // forward pass: enforce minGap
+  // --- IMPORTANTE: evitar que los anclajes queden demasiado juntos (previene bandas duras) ---
+  const minGap = 1e-2; // separación mínima normalizada entre anclajes (ajustable)
+  // pase hacia adelante: forzar la separación mínima
   for (let i = 1; i < anchors.length; i++) {
     const prev = anchors[i - 1].p;
     if (anchors[i].p < prev + minGap) anchors[i].p = prev + minGap;
   }
-  // backward pass: enforce minGap from the end
+  // pase hacia atrás: forzar la separación mínima desde el final
   for (let i = anchors.length - 2; i >= 0; i--) {
     const next = anchors[i + 1].p;
     if (anchors[i].p > next - minGap) anchors[i].p = next - minGap;
@@ -79,7 +102,7 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
   // clamp to [0,1]
   anchors = anchors.map(a => ({ p: clamp01(a.p), color: a.color }));
 
-  // helpers color conversion
+  // helpers: conversión entre hex <-> rgb
   const hexToRgb = (hex: string) => {
     const h = hex.replace("#", "");
     const n = parseInt(h, 16);
@@ -87,14 +110,14 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
   };
   const rgbToHex = (r: number, g: number, b: number) =>
     "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
-
-  // interpolation between two hex colors
+  
+  // Interpolación entre dos colores hex
   const interpColor = (c1: string, c2: string, t: number) => {
     const a = hexToRgb(c1), b = hexToRgb(c2);
     return rgbToHex(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t);
   };
 
-  // sample a dense colorscale to avoid banding
+  // muestreo denso de la rampa para evitar bandas (banding)
   const N = 128;
   const sampled: [number, string][] = [];
   for (let i = 0; i < N; i++) {
@@ -114,7 +137,7 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
     sampled.push([clamp01(pos), color]);
   }
 
-  // compact: remove consecutive near-duplicates and ensure monotonic unique positions
+  // compactar: eliminar duplicados cercanos y asegurar posiciones únicas y monótonas
   const uniq: [number, string][] = [];
   let lastPos = -1;
   for (const [p, c] of sampled) {
@@ -128,20 +151,23 @@ export function buildThresholdColorscale(zmin: number, zmax: number, thresholds:
 }
 
 /**
- * Apply simple dB-per-meter attenuation to a z-matrix using a given distance grid.
- * z and dist must share the same shape [rows][cols].
- * Returns a new matrix (does not mutate input).
+ * applyColorAttenuation
  *
- * dbPerMeter: how many dB to subtract per meter of distance (e.g. 0.5 .. 2.0)
- * spreadCells: optional integer radius (in grid cells) to blur the resulting z-field so the gradient
- *              "expands" in all directions. Use 0 (default) to disable.
- * mask: optional same-shape boolean/number matrix. Cells with falsy/0 block contributions (blur respects máscara).
- * maskOptions: optional { invert?: boolean, mode?: 'source'|'receive'|'both' }
- *   - invert: treat mask values inverted (useful si la máscara está al revés).
- *   - mode:
- *       'source' (default): mask limits which cells act as sources (can spread to unmasked receivers).
- *       'receive': mask limits which cells can receive spread (
- *       'both': both source and receiver must be allowed by mask.
+ * Aplica una atenuación simple en dB por metro a una matriz z usando una matriz de distancias.
+ * Ambas matrices deben tener la misma forma [filas][columnas].
+ * Devuelve una nueva matriz (no muta la entrada).
+ *
+ * Parámetros:
+ *  - dbPerMeter: dB por metro a restar (ej. 0.5 .. 2.0).
+ *  - spreadCells: radio entero (en celdas) para aplicar blur gaussiano y expandir el gradiente.
+ *    Use 0 (por defecto) para desactivar.
+ *  - mask: matriz opcional del mismo tamaño que limita dónde se aplica la difusión.
+ *  - maskOptions: { invert?: boolean, mode?: 'source'|'receive'|'both' }.
+ *      - invert: invertir la interpretación de la máscara.
+ *      - mode:
+ *         'source' (por defecto): la máscara limita qué celdas actúan como fuentes.
+ *         'receive': la máscara limita qué celdas pueden recibir difusión.
+ *         'both': ambas condiciones deben cumplirse.
  */
 export function applyColorAttenuation(
 	z: number[][],
@@ -171,8 +197,15 @@ export function applyColorAttenuation(
 	return out;
 }
 
-// Añadido: difuminado gaussiano (separable) simple usando kernel gaussiano.
-// radius: número de celdas (enteros). Si radius <= 0 devuelve la matriz sin cambios.
+/**
+ * gaussianBlurMatrix(src, radius)
+ *
+ * Convolución separable 2D usando un kernel gaussiano 1D para suavizar la matriz numérica.
+ * - radius: radio en celdas (entero). Si radius <= 0 devuelve la matriz original.
+ * Implementación eficiente separable: primero horizontal, luego vertical.
+ *
+ * Retorna: nueva matriz suavizada.
+ */
 function gaussianBlurMatrix(src: number[][], radius: number) {
 	if (radius <= 0) return src;
 	const h = src.length;
@@ -221,8 +254,18 @@ function gaussianBlurMatrix(src: number[][], radius: number) {
 	return out;
 }
 
-// Añadido/Modificado: blur gaussiano que respeta una máscara (misma forma que src).
-// Ahora acepta opciones: invert y mode ('source'|'receive'|'both').
+/**
+ * gaussianBlurMatrixMasked(src, radius, mask, options)
+ *
+ * Versión del blur gaussiano que respeta una máscara:
+ * - mask: matriz booleana/num que indica celdas válidas.
+ * - options:
+ *    - invert: invertir la interpretación de la máscara.
+ *    - mode: 'source'|'receive'|'both' controla si la máscara filtra emisores, receptores o ambos.
+ *
+ * El algoritmo acumula valores y pesos (normaliza por la suma de pesos válidos) para evitar fugas.
+ * Retorna: nueva matriz suavizada respetando la máscara.
+ */
 function gaussianBlurMatrixMasked(
 	src: number[][],
 	radius: number,
@@ -259,17 +302,17 @@ function gaussianBlurMatrixMasked(
 		return Boolean(mask[yy][xx]);
 	};
 
-	// horizontal pass: accumulate value*kernel*mask-source and weight sum kernel*mask-source
+	// pase horizontal: acumular value*kernel para fuentes permitidas y sumar pesos válidos
 	for (let y = 0; y < h; y++) {
 		for (let x = 0; x < w; x++) {
 			let acc = 0;
 			let wacc = 0;
 			for (let k = -r; k <= r; k++) {
 				const sx = Math.min(w - 1, Math.max(0, x + k));
-				// source mask evaluation (apply invert)
+				// evaluación de máscara para la fuente (aplica 'invert' si procede)
 				let srcAllowed = isMasked(y, sx);
 				if (invert) srcAllowed = !srcAllowed;
-				// if mode === 'receive' we allow all sources (reception is limited later)
+				// si mode === 'receive' permitimos todas las fuentes aquí (la recepción se evalúa luego)
 				if (mode === 'receive') srcAllowed = true;
 				if (!srcAllowed) continue;
 				const kv = kernel[k + r];
@@ -282,6 +325,7 @@ function gaussianBlurMatrixMasked(
 	}
 
 	// vertical pass: combine and normalize; respect receiver mask depending on mode
+	// pase vertical: combinar y normalizar; respetar máscara del receptor según el modo
 	for (let y = 0; y < h; y++) {
 		for (let x = 0; x < w; x++) {
 			// receiver decision
@@ -312,11 +356,22 @@ function gaussianBlurMatrixMasked(
 }
 
 /**
- * Genera un mapa de Lp rojo alrededor de las fachadas usando un modelo simple pero físico:
- * - LwMap: mapa { segmentName: Lw_room_dB } (si falta, se puede usar `peak` como fallback)
- * - ReMap: opcional { segmentName: RePrime_dB } (pérdida de fachada). Lw_out = Lw_room - RePrime
- * - model: Lp_sample ≈ Lw_out - 20*log10(r) - 10*log10(4π) - dbPerMeter * r
- * - se suman energías (no máximos). Se aplica ponderación elíptica (perpendicular + along).
+ * generateRedGradient(...)
+ *
+ * Genera un mapa simple de Lp (dB) a partir de emisores discretos colocados sobre las fachadas.
+ * - Ley usada: Lp_sample ≈ Lw_out - 20·log10(r) - 10·log10(4π) - dbPerMeter·r.
+ * - Cada segmento se discretiza en emisores (sampleSpacing) y se aplica un kernel elíptico
+ *   con sigma perpendicular y sigma longitudinal.
+ * - Se suman energías lineales y se devuelve la matriz en dB (o -Infinity si no hay contribución).
+ *
+ * Parámetros principales:
+ *  - gridX, gridY: vectores de coordenadas de la grilla (centros de celda).
+ *  - segments: lista de segmentos {name,p1,p2}.
+ *  - LwMap: niveles por segmento (dB).
+ *  - ReMap: pérdidas de transmisión por fachada (dB).
+ *  - maxDist, dbPerMeter, sampleSpacing, sigmaAlongFactor: parámetros de muestreo/atenuación.
+ *
+ * Retorna: matriz [rows][cols] con Lp estimado en dB (o -Infinity si no aplicable).
  */
 export function generateRedGradient(
 	gridX: number[],
@@ -344,10 +399,10 @@ export function generateRedGradient(
 	const sampleSpacing = options?.sampleSpacing ?? 0.25;
 	const sigmaAlongFactor = options?.sigmaAlongFactor ?? 0.25;
 
-	// constant term 10*log10(4*pi) ~ 10.99 dB
+	// termino constante 10*log10(4*pi) ~ 10.99 dB
 	const FOUR_PI_CONST = 10 * Math.log10(4 * Math.PI);
 
-	// Simple point-in-polygon (ray-casting)
+	// Punto-en-polígono simple (algoritmo del rayo)
 	function pointInPoly(x: number, z: number, poly: number[][]) {
 		if (!poly || poly.length < 3) return false;
 		let inside = false;
@@ -360,9 +415,7 @@ export function generateRedGradient(
 		return inside;
 	}
 
-	
-
-	// compute approximate centroid to orient normals outward
+	// Calcular centróide aproximado para orientar normales hacia el exterior
 	const center = (() => {
 		let sx = 0, sz = 0, c = 0;
 		for (const s of segments) {
@@ -373,24 +426,24 @@ export function generateRedGradient(
 		return c ? { x: sx / c, z: sz / c } : { x: 0, z: 0 };
 	})();
 
-	// For each grid point accumulate linear energy from all facade samples
+	// Para cada punto de la grilla acumular energía lineal de todas las muestras sobre fachadas
 	for (let j = 0; j < h; j++) {
 		for (let i = 0; i < w; i++) {
 			const px = gridX[i], pz = gridY[j];
 
-			// Respect perimeter: skip interior points
+			// Respetar perímetro: omitir puntos interiores
 			if (pointInPoly(px, pz, perimeter)) {
 				out[j][i] = 0;
 				continue;
 			}
 
-			let totalE = 0; // linear energy sum
+			let totalE = 0; // suma de energía lineal
 
 			for (const seg of segments) {
 				const segName = seg.name ?? "";
-				// Lw inside room for this facade (dB). fallbackPeak if absent.
+				// Lw dentro de la sala para esta fachada (dB). Si falta, usar fallbackPeak.
 				const Lw_room = Number.isFinite(Number(LwMap[segName])) ? Number(LwMap[segName]) : fallbackPeak;
-				// apply facade transmission loss if provided
+				// aplicar pérdida de transmisión de fachada si está provista
 				const Re = Number.isFinite(Number(ReMap[segName])) ? Number(ReMap[segName]) : 0;
 				const Lw_out = Lw_room - Re;
 
@@ -399,13 +452,13 @@ export function generateRedGradient(
 				const segLen = Math.hypot(dx, dz);
 				if (segLen < 1e-6) continue;
 
-				// orient normal outward using centroid
+				// orientar la normal hacia el exterior usando el centróide (heurística)
 				const tx = dx / segLen, tz = dz / segLen;
 				let nx = -tz, nz = tx;
 				const midX = (a[0] + b[0]) / 2, midZ = (a[1] + b[1]) / 2;
 				if (((midX - center.x) * nx + (midZ - center.z) * nz) < 0) { nx = -nx; nz = -nz; }
 
-				// number of discrete sources along facade
+				// número de emisores discretos a lo largo de la fachada
 				const nSamples = Math.max(1, Math.ceil(segLen / sampleSpacing));
 				const sampleLen = segLen / nSamples;
 				const P_total_linear = Math.pow(10, Lw_out / 10); // linear power reference
@@ -422,16 +475,16 @@ export function generateRedGradient(
 					const perp = vrx * nx + vrz * nz;
 					if (perp <= 0 || perp > maxDist) continue; // only outside and within maxDist
 
-					// geometric loss: 20*log10(r) + 10*log10(4π)
+					// geometric loss: 20*log10(dClamp) + FOUR_PI_CONST;
 					const dClamp = Math.max(0.01, dist);
 					const geomLoss = 20 * Math.log10(dClamp) + FOUR_PI_CONST;
 					const atmosLoss = dbPerMeter * dClamp;
 					const Lp_sample_db = 10 * Math.log10(Math.max(1e-12, P_per_sample)) - geomLoss - atmosLoss;
 
-					// lateral (perp) gaussian
+					// gaussiana lateral (perpendicular)
 					const sigma_perp = Math.max(0.15, maxDist * 0.45);
 					const w_perp = Math.exp(- (perp * perp) / (2 * sigma_perp * sigma_perp));
-					// longitudinal gaussian centered at middle of segment
+					// gaussiana longitudinal centrada en la mitad del segmento
 					const sigma_along = Math.max(0.5, segLen * sigmaAlongFactor);
 					const along = (frac * segLen);
 					const w_along = Math.exp(- Math.pow(along - segLen / 2, 2) / (2 * sigma_along * sigma_along));
@@ -453,17 +506,10 @@ export function generateRedGradient(
 }
 
 /**
- * generateRedHeatmapFromFacade
- * - Usar WaveEmitter para crear fuentes muestreadas sobre el perímetro/segmentos.
- * - Calcular dos mapas físicos (rojo estrecho, amarillo ancho) con ISOModel.computeGridLpFromSources.
- * - Mezclar energías lineales para obtener un resultado natural: rojo centrado + halo amarillo.
+ * generateRedHeatmapFromFacade(...)
  *
- * Opciones relevantes:
- *  - redMaxDist, yellowMaxDist (m)
- *  - sampleSpacing (m)
- *  - dbPerMeter
- *  - redWeight, yellowWeight
- *  - applyYellowBlur: radio en celdas para suavizar halo
+ * Genera un heatmap combinado (rojo estrecho + halo amarillo) muestreando emisores sobre el perímetro.
+ * Documentación y comentarios en español arriba.
  */
 export function generateRedHeatmapFromFacade(
 	gridX: number[],
@@ -483,20 +529,21 @@ export function generateRedHeatmapFromFacade(
 	}
 ) {
 	const w = gridX.length, h = gridY.length;
-	// redMaxDist: short-range tight red band; keep small by default
+	// redMaxDist: alcance corto típico para la banda roja; mantener pequeño por defecto
 	const redMaxDist = options?.redMaxDist ?? 2.0;
-	// Increase yellowMaxDist to produce a broader yellow halo by default.
-	// If user supplied options.yellowMaxDist, use it; otherwise use a larger fallback.
-	const yellowMaxDist = options?.yellowMaxDist ?? Math.max(6, redMaxDist * 6);
+	// Aumentar yellowMaxDist para producir un halo amarillo más amplio por defecto.
+	// Si el usuario pasa options.yellowMaxDist se utilizará ese valor.
+	const yellowMaxDist = options?.yellowMaxDist ?? Math.max(12, redMaxDist * 8);
+
 	const sampleSpacing = options?.sampleSpacing ?? 0.25;
 	const outwardOffset = options?.outwardOffset ?? 0.02;
 	const dbPerMeter = options?.dbPerMeter ?? 0.5;
-	// Make yellow contribution stronger and smoother by default:
+	// Hacer la contribución amarilla más visible y suave por defecto:
 	const redWeight = options?.redWeight ?? 1.0;
-	const yellowWeight = options?.yellowWeight ?? 0.9;
-	// applyYellowBlur controls spatial smoothing (in grid cells) of the yellow map.
-	// Increase default to create a visibly larger, softer halo.
-	const applyYellowBlur = options?.applyYellowBlur ?? 6;
+	const yellowWeight = options?.yellowWeight ?? 1.0;
+	// applyYellowBlur controla el suavizado espacial (en celdas) del mapa amarillo.
+	// Aumentar el valor por defecto para crear un halo más ancho y suave.
+	const applyYellowBlur = options?.applyYellowBlur ?? 12;
 
 	// prepare segments/sources (unchanged)
 	const segmentsWithNames = segments.map((seg, i) => ({
